@@ -17,6 +17,7 @@ http://127.0.0.1:5000 w przegladarce.
 
 import json
 import os
+from datetime import datetime, timezone
 
 import numpy as np
 from flask import Flask, jsonify, request, send_from_directory
@@ -141,6 +142,16 @@ def api_analyze():
     })
 
 
+def _seconds_since(iso_timestamp):
+    try:
+        ts = datetime.fromisoformat(iso_timestamp)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
 @app.route("/api/monitor/status")
 def api_monitor_status():
     """
@@ -149,6 +160,22 @@ def api_monitor_status():
     nie byl uruchomiony (plik nie istnieje), zwraca `running: false`
     zamiast bledu - dashboard traktuje to jako "brak aktywnego
     monitoringu", nie awarie API.
+
+    Dodatkowo liczy DWA NIEZALEZNE sygnaly "na zywo" (przydatne np. dla
+    OBD-II/czujnika, ktory moze sie rozlaczyc bez zabijania samego
+    procesu monitor.py):
+      - `checker_online`: czy PETLA monitor.py w ogole jeszcze dziala
+        (swiezosc pola `timestamp` - kazde sprawdzenie je aktualizuje,
+        NIEZALEZNIE od tego, czy przyszly nowe dane).
+      - `data_live`: czy zrodlo danych (CSV od obd_source.py/czujnika)
+        FAKTYCZNIE jeszcze rosnie (swiezosc `last_data_change`, ktore
+        monitor.py aktualizuje TYLKO gdy n_samples realnie wzrosnie).
+    Rozroznienie to jest celowe: monitor.py moze grzecznie odpytywac ten
+    sam, juz nierosnacy CSV co --interval sekund (wiec `checker_online`
+    bylby caly czas True), mimo ze adapter OBD-II dawno sie rozlaczyl -
+    tylko `data_live` to wykryje. Oba pola sa `None`, gdy `interval` nie
+    jest znany (monitor.py uruchomiony w trybie `--once`/cron, gdzie nie
+    ma jednego stalego oczekiwanego rytmu do porownania).
     """
     if not os.path.exists(STATUS_FILE):
         return jsonify({"running": False})
@@ -162,6 +189,20 @@ def api_monitor_status():
         # migotal czerwonym bledem przy kazdym odswiezeniu w zlym momencie.
         return jsonify({"running": True, "error": f"chwilowy blad odczytu: {exc}"}), 200
     status["running"] = True
+
+    interval = status.get("interval")
+    if interval:
+        threshold = max(3 * float(interval), 15.0)
+        age_checker = _seconds_since(status.get("timestamp"))
+        age_data = _seconds_since(status.get("last_data_change"))
+        status["checker_online"] = (age_checker is not None and age_checker < threshold)
+        status["data_live"] = (age_data is not None and age_data < threshold)
+        status["seconds_since_data_change"] = age_data
+    else:
+        status["checker_online"] = None
+        status["data_live"] = None
+        status["seconds_since_data_change"] = None
+
     return jsonify(status)
 
 

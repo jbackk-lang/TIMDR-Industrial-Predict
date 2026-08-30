@@ -121,9 +121,32 @@ def run_check(args, fusion, predict):
         smooth_window=args.smooth_window,
     )
 
+    now_iso = datetime.now(timezone.utc).isoformat()
+    n_samples = int(len(t))
+
+    # ROZROZNIENIE "checker zyje" vs "zrodlo danych faktycznie zyje" - dla
+    # zrodel typu OBD-II/czujnik na zywo, monitor.py moze dalej grzecznie
+    # odpytywac CSV co --interval sekund (wiec 'timestamp' ponizej zawsze
+    # bedzie swiezy) NAWET jesli obd_source.py/adapter sie rozlaczyl i CSV
+    # przestal rosnac - sam swiezy 'timestamp' tego NIE wykryje. Dlatego
+    # osobno sledzimy `last_data_change`: moment, w ktorym n_samples
+    # OSTATNI RAZ faktycznie wzrosl (odczytane z poprzedniego stanu przed
+    # nadpisaniem) - to jest prawdziwy sygnal "czy dane na zywo naplywaja",
+    # nie tylko "czy petla monitor.py dziala".
+    last_data_change = now_iso
+    try:
+        with open(args.state_file) as f:
+            prev = json.load(f)
+        if prev.get("n_samples") == n_samples and prev.get("last_data_change"):
+            last_data_change = prev["last_data_change"]
+    except (OSError, json.JSONDecodeError, KeyError):
+        pass
+
     status = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "n_samples": int(len(t)),
+        "timestamp": now_iso,
+        "last_data_change": last_data_change,
+        "interval": (None if args.once else args.interval),
+        "n_samples": n_samples,
         "sensor_cols": sensor_cols,
         "E_last": float(E[-1]),
         "health_score": float(hs),

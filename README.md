@@ -95,14 +95,23 @@ opuszczają komputera.
 - **📡 Panel monitoringu na żywo** — jeśli w tle działa `monitor.py`,
   dashboard pokazuje na bieżąco (odświeżanie co 5s) jego wynik: liczbę
   próbek, health, TTF i alarm. Panel jest niewidoczny, jeśli
-  `monitor.py` nie jest uruchomiony.
+  `monitor.py` nie jest uruchomiony. Dodatkowo, w trybie ciągłym
+  (`--interval`), panel pokazuje 🟢 live / 🔴 offline — to ROZRÓŻNIENIE,
+  nie to samo co "czy monitor.py działa": `monitor.py` może grzecznie
+  odpytywać ten sam, już nierosnący plik CSV co `--interval` sekund
+  (np. gdy adapter OBD-II się rozłączył), a badge poprawnie pokaże
+  🔴 offline mimo że sam proces monitorujący wciąż żyje — zweryfikowane
+  wprost: symulacja rosnącego, potem zatrzymanego, potem znów rosnącego
+  pliku CSV poprawnie przełącza badge live→offline→live.
 - **🧪 Panel diagnostyki kalibracji** — jednorazowa informacja z
   MOMENTU kalibracji (nie odświeża się co 5s, żeby nie zaszumiać
   widoku): jaką metodą skalibrowano, ile próbek do stabilizacji wg
   `calibration_convergence()`, i czy wybrane okno przeszło walidację
   Manna-Kendalla.
-- Przyciski: wczytaj dane demo / wczytaj CSV / uruchom analizę, pola
-  `threshold`/`window`/nazwa kolumny czasu.
+- Analiza uruchamia się **automatycznie** po wybraniu scenariusza,
+  wczytaniu CSV, albo zmianie `threshold`/`window` — nie trzeba osobnego
+  przycisku "uruchom analizę"; pole obok pól liczbowych pokazuje
+  "⏳ analizowanie…" / "✓ przeanalizowano HH:MM:SS".
 
 ## 🎲 Scenariusze demo (`demo_scenarios.py`)
 
