@@ -6,8 +6,8 @@ Fuzja wielu czujników maszyny (temperatura, wibracje, ciśnienie, prąd,
 detektorów TIMDR (twist, trend, anomalie, rytm) na tym sygnale.
 """
 
+import math
 import numpy as np
-from scipy.stats import norm
 
 
 class TIMDRIndustrialFusion:
@@ -288,7 +288,14 @@ class TIMDRIndustrialFusion:
             z = (s + 1) / np.sqrt(var_s)
         else:
             z = 0.0
-        p = 2 * (1 - norm.cdf(abs(z)))
+        # NAPRAWIONE (Device Guard/WDAC blokował scipy._quadpack.pyd na
+        # maszynie firmowej uzytkownika): 2*(1-norm.cdf(|z|)) to dokladnie
+        # math.erfc(|z|/sqrt(2)) dla standardowego rozkladu normalnego -
+        # tozsamosc matematyczna, nie przyblizenie. math.erfc jest w
+        # stdlib (modul math jest wbudowany w interpreter, nie ma wlasnego
+        # DLL do zaladowania jak scipy), wiec eliminuje jedyna w calym
+        # repo zaleznosc od scipy bez zadnej utraty dokladnosci.
+        p = math.erfc(abs(z) / math.sqrt(2))
         return float(s), float(z), float(p)
 
     def validate_window(self, sensors_window, alpha=0.05):

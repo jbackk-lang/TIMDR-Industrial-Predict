@@ -409,6 +409,30 @@ silniku 1 (patrz Błąd 5 wyżej): jeden czujnik z istotnym trendem nawet
 w najlepszym wybranym oknie — potwierdza to, że to nie przypadek
 jednego silnika, tylko właściwość samych danych run-to-failure.
 
+## Usunięcie zależności od scipy — blokowana przez Device Guard/WDAC na maszynie firmowej
+
+Jedyne użycie scipy w całym repo (`timdr_industrial_fusion.py`,
+`validate_window()`, test Manna-Kendalla): `p = 2 * (1 - norm.cdf(abs(z)))`
+z `scipy.stats`. Na komputerze firmowym użytkownika (Windows z polityką
+Device Guard/WDAC) import `scipy.stats` wywalał się z
+`ImportError: DLL load failed while importing _quadpack: Twoja
+organizacja zablokowała tę aplikację za pomocą funkcji Device Guard` —
+mimo że Python był już zainstalowany systemowo w `C:\Program Files\`
+(inny skompilowany DLL z tego samego środowiska, `pandas`, ładował się
+bez problemu — czyli blokada jest bardziej granularna niż "ścieżka
+user-profile vs systemowa", raczej per-plik/wydawca).
+
+Naprawione bez utraty dokładności: `2*(1-norm.cdf(|z|))` to dokładna
+tożsamość matematyczna `math.erfc(|z|/sqrt(2))` dla standardowego
+rozkładu normalnego — nie przybliżenie. `math.erfc` jest w bibliotece
+standardowej Pythona (wbudowany w interpreter, bez własnego ładowanego
+DLL), więc eliminuje jedyną zależność od scipy w tym repo. `scipy`
+usunięte też z `requirements.txt`. 61/61 testów przechodzi bez zmian po
+tej podmianie.
+
+**Ten sam plik (`timdr_ev_fusion.py`) był skopiowany 1:1 do
+`TIMDR-EV-Predict` — identyczna poprawka zastosowana tam równolegle.**
+
 ## ✅ Co było już poprawnie zaprojektowane (bez zmian)
 
 - `fuse()`: normalizacja każdej cechy (median/MAD) przed połączeniem w
