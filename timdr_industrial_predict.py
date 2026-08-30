@@ -148,6 +148,64 @@ class TIMDRIndustrialPredict:
 
         return float(ttf), float(ttf_linear), float(ttf_exp)
 
+    # ---------- TTF unormowany czasem: opoznienie + srednia z okresu ----------
+    def predict_failure_smoothed(self, t, E, threshold=3.0, window=60,
+                                  smooth_window=10, min_len=5):
+        """
+        ZNALEZIONY PROBLEM (test na realnym silniku NASA C-MAPSS):
+        pojedyncze wywolanie `predict_failure()` jest niestabilne na
+        prawie plaskim/zdrowym sygnale - regresja liniowa/wykladnicza na
+        szumie latwo zmienia znak i wielkosc nachylenia z probki na
+        probke. Zweryfikowano wprost: ta sama, fizycznie zdrowa faza
+        silnika dawala kolejno TTF = inf, 87.7, inf, 737.4, inf w
+        odstepie kilkudziesieciu cykli - nie dlatego, ze stan maszyny
+        sie zmienial, tylko dlatego, ze pojedynczy punktowy fit jest
+        szumowrazliwy.
+
+        Naprawiono dwoma mechanizmami naraz, tak jak poprosil uzytkownik
+        ("unormowac czasem - opoznienie i srednia z jakiegos okresu"):
+        - OPOZNIENIE: przed zebraniem co najmniej `min_len` probek w
+          ogole nie probojemy szacowac TTF (zwracamy inf) - zbyt krotka
+          historia to gwarantowany szum, nie sygnal.
+        - SREDNIA Z OKRESU: zamiast jednego punktowego oszacowania,
+          liczymy `predict_failure()` OSOBNO dla kazdego z ostatnich
+          `smooth_window` konczacych punktow historii (rosnace okna
+          konczace sie na coraz pozniejszych probkach) i zwracamy
+          MEDIANE tych surowych oszacowan - mediana, nie srednia
+          arytmetyczna, zeby pojedynczy `inf` (brak wykrywalnego trendu
+          w danym momencie) nie psul calego wyniku tak, jak zrobiloby to
+          zwykle usrednianie.
+
+        Dodatkowo `confirmed` mowi, czy przynajmniej POLOWA ostatnich
+        surowych oszacowan byla skonczona (finite) - jesli nie, wiekszosc
+        "widzianych" TTF-ow to "brak trendu", wiec zwracamy `inf` zamiast
+        pojedynczego niskiego wyniku, ktory moglby byc odosobnionym
+        szumem (podobny mechanizm hysterezy co `thr_on`/`thr_off` w
+        STA/LTA - nie ufaj pojedynczemu przekroczeniu).
+
+        Zwraca: (ttf_smoothed, confirmed, historia_surowych_ttf).
+        """
+        t = np.asarray(t, float)
+        E = np.asarray(E, float)
+        n = len(E)
+
+        if n < min_len:
+            return float("inf"), False, []
+
+        start = max(min_len, n - smooth_window)
+        raw_ttfs = []
+        for i in range(start, n + 1):
+            ttf_i, _, _ = self.predict_failure(t[:i], E[:i], threshold=threshold, window=window)
+            raw_ttfs.append(ttf_i)
+
+        finite = [x for x in raw_ttfs if np.isfinite(x)]
+        confirmed = len(finite) >= max(1, len(raw_ttfs) // 2)
+
+        if not confirmed:
+            return float("inf"), False, raw_ttfs
+
+        return float(np.median(finite)), True, raw_ttfs
+
     # ---------- health-score ----------
     def health_score(self, E, threshold=3.0, window=20):
         """

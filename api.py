@@ -6,11 +6,17 @@ Serwer Flask udostepniajacy:
   GET  /api/scenarios     -> lista dostepnych scenariuszy demo (nazwa, opis, sugerowany prog)
   GET  /api/demo          -> syntetyczny zestaw czujnikow (?scenario=<nazwa>, domyslnie bearing_wear)
   POST /api/analyze       -> pelna analiza TIMDR (fuse + twist/trend/anomalies/rhythm + TTF + health)
+  GET  /api/monitor/status -> ostatni stan zapisany przez monitor.py (timdr_status.json), do panelu live
+  GET  /api/monitor/calibration -> raport z MOMENTU kalibracji (Mann-Kendall + ile probek do
+                                    stabilizacji) - pisany RAZ przez monitor.py, nie w petli live
   GET  /api/health        -> healthcheck samego API (nie mylic z health_score maszyny)
 
 Uruchomienie: `python api.py` (albo `run.bat` na Windows), potem
 http://127.0.0.1:5000 w przegladarce.
 """
+
+import json
+import os
 
 import numpy as np
 from flask import Flask, jsonify, request, send_from_directory
@@ -20,6 +26,15 @@ from timdr_industrial_fusion import TIMDRIndustrialFusion
 from timdr_industrial_predict import TIMDRIndustrialPredict
 
 app = Flask(__name__, static_folder="static", static_url_path="")
+
+# Plik zapisywany przez monitor.py (--state-file) - domyslnie w tym samym
+# katalogu co api.py. Jesli monitor.py dziala z innego katalogu roboczego
+# z innym --state-file, ustaw zmienna srodowiskowa TIMDR_STATUS_FILE.
+STATUS_FILE = os.environ.get("TIMDR_STATUS_FILE", "timdr_status.json")
+
+# Plik raportu kalibracji zapisywany przez monitor.py (--calib-report) -
+# RAZ, przy faktycznej (nowej) kalibracji, nie przy kazdym sprawdzeniu.
+CALIB_REPORT_FILE = os.environ.get("TIMDR_CALIB_REPORT_FILE", "timdr_calibration_report.json")
 
 fusion = TIMDRIndustrialFusion()
 predict = TIMDRIndustrialPredict()
@@ -124,6 +139,52 @@ def api_analyze():
         "threshold": threshold,
         "window": window,
     })
+
+
+@app.route("/api/monitor/status")
+def api_monitor_status():
+    """
+    Zwraca ostatni stan zapisany przez `monitor.py` (ciagly albo
+    okresowy - patrz README) do `STATUS_FILE`. Jesli monitor.py nigdy
+    nie byl uruchomiony (plik nie istnieje), zwraca `running: false`
+    zamiast bledu - dashboard traktuje to jako "brak aktywnego
+    monitoringu", nie awarie API.
+    """
+    if not os.path.exists(STATUS_FILE):
+        return jsonify({"running": False})
+    try:
+        with open(STATUS_FILE) as f:
+            status = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        # POPRAWKA: monitor.py moze akurat zapisywac plik w momencie
+        # odczytu (nie jest to atomowy zapis) - traktujemy to jako
+        # przejsciowy brak danych, nie blad 500, zeby panel live nie
+        # migotal czerwonym bledem przy kazdym odswiezeniu w zlym momencie.
+        return jsonify({"running": True, "error": f"chwilowy blad odczytu: {exc}"}), 200
+    status["running"] = True
+    return jsonify(status)
+
+
+@app.route("/api/monitor/calibration")
+def api_monitor_calibration():
+    """
+    Zwraca raport zapisany RAZ przez monitor.py w momencie faktycznej
+    kalibracji (--healthy-ref lub --auto-calibrate) - metoda, ile probek
+    uzyto, wynik walidacji Mann-Kendalla (czy okno kalibracyjne ma
+    statystycznie istotny trend) i ile probek teoretycznie trzeba do
+    stabilizacji (calibration_convergence). NIE odswieza sie przy kazdym
+    sprawdzeniu jak /api/monitor/status - to diagnostyka jednorazowa,
+    dashboard pobiera ja raz przy zaladowaniu strony, nie w petli.
+    """
+    if not os.path.exists(CALIB_REPORT_FILE):
+        return jsonify({"available": False})
+    try:
+        with open(CALIB_REPORT_FILE) as f:
+            report = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return jsonify({"available": True, "error": f"chwilowy blad odczytu: {exc}"}), 200
+    report["available"] = True
+    return jsonify(report)
 
 
 if __name__ == "__main__":

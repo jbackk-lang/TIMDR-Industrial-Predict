@@ -150,3 +150,64 @@ def test_health_score_spojny_z_threshold_w_predict_failure():
     ttf, _, _ = predict.predict_failure(t, E, threshold=3.0)
     assert score == pytest.approx(0.0, abs=1e-9)
     assert ttf == 0.0  # oba zgodnie zglaszaja "juz krytyczny"
+
+
+# -----------------------------------------------------------
+# predict_failure_smoothed() - opoznienie + mediana z okresu
+# -----------------------------------------------------------
+
+def test_smoothed_zbyt_krotka_historia_zwraca_inf_nieskonfirmowane():
+    predict = TIMDRIndustrialPredict()
+    t = np.arange(3, dtype=float)
+    E = np.array([1.0, 1.1, 0.9])
+    ttf, confirmed, raw = predict.predict_failure_smoothed(t, E, min_len=5)
+    assert ttf == float("inf")
+    assert confirmed is False
+    assert raw == []
+
+
+def test_smoothed_stabilniejszy_niz_pojedynczy_odczyt_na_szumie():
+    """Regresja dla realnego problemu z NASA C-MAPSS: pojedyncze
+    predict_failure() na prawie plaskim, zaszumionym sygnale skacze
+    miedzy inf a rozne skonczone wartosci z probki na probke. Mediana
+    z ostatnich `smooth_window` surowych oszacowan powinna byc mniej
+    zmienna w czasie niz pojedynczy punktowy odczyt."""
+    rng = np.random.default_rng(7)
+    n = 80
+    E = np.abs(rng.normal(1.0, 0.15, n))  # plaski, zaszumiony, zdrowy sygnal
+    t = np.arange(n, dtype=float)
+
+    single_ttfs = []
+    smoothed_ttfs = []
+    predict = TIMDRIndustrialPredict()
+    for c in range(20, n + 1, 5):
+        ttf_single, _, _ = predict.predict_failure(t[:c], E[:c], threshold=30.0, window=60)
+        ttf_smooth, _, _ = predict.predict_failure_smoothed(t[:c], E[:c], threshold=30.0, window=60, smooth_window=10)
+        single_ttfs.append(ttf_single)
+        smoothed_ttfs.append(ttf_smooth)
+
+    def variability(xs):
+        finite = [x for x in xs if np.isfinite(x)]
+        return np.std(finite) if len(finite) > 1 else 0.0
+
+    assert variability(smoothed_ttfs) <= variability(single_ttfs) * 1.5, (
+        f"mediana z okresu nie jest stabilniejsza: single={single_ttfs} smoothed={smoothed_ttfs}"
+    )
+
+
+def test_smoothed_wykrywa_prawdziwa_degradacje():
+    predict = TIMDRIndustrialPredict()
+    n_healthy, n_degrade = 50, 100
+    rng = np.random.default_rng(0)
+    E_healthy = np.abs(rng.normal(0, 0.05, n_healthy))
+    E_degrade = np.linspace(E_healthy[-1], 15.0, n_degrade)
+    E = np.concatenate([E_healthy, E_degrade])
+    t = np.arange(len(E), dtype=float)
+
+    ttf_early, confirmed_early, _ = predict.predict_failure_smoothed(
+        t[:n_healthy], E[:n_healthy], threshold=15.0, smooth_window=10)
+    ttf_late, confirmed_late, _ = predict.predict_failure_smoothed(
+        t, E, threshold=15.0, smooth_window=10)
+
+    assert confirmed_late is True
+    assert ttf_late < 20.0

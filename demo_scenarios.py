@@ -7,7 +7,11 @@ faktycznie uruchamiał deklarowany detektor (zweryfikowane w
 test_demo_scenarios.py, nie tylko założone).
 """
 
+import os
+
 import numpy as np
+
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "real_engines")
 
 SCENARIOS = {
     "bearing_wear": "Zużycie łożysk — narastająca wibracja i temperatura (trend), TTF liczy się w przód",
@@ -15,6 +19,8 @@ SCENARIOS = {
     "uneven_motor_rotation": "Nierówne obroty silnika — cykliczne wahania prądu/wibracji (rytm) z okazjonalnymi skokami (anomalia)",
     "resonance_loose_parts": "Rezonans / luźne elementy — regularne uderzenia wibracji, narastające w czasie (rytm + twist)",
     "duty_cycle_problems": "Problemy z cyklem pracy — powtarzalny cykl włącz/wyłącz (rytm) z jednym zepsutym cyklem (anomalia) i dryfem bazowym (trend)",
+    "real_engine_1_full": "🛩️ REALNE dane (NASA C-MAPSS FD001, silnik nr 1) — pełny przebieg run-to-failure, 192 cykle",
+    "real_engine_2_live": "🛩️ REALNE dane (NASA C-MAPSS FD001, silnik nr 2) — tylko pierwsze 85 cykli, silnik wciąż zdrowy (symulacja monitoringu na żywo)",
 }
 
 DEFAULT_THRESHOLDS = {
@@ -23,6 +29,16 @@ DEFAULT_THRESHOLDS = {
     "uneven_motor_rotation": 3.5,
     "resonance_loose_parts": 20.0,
     "duty_cycle_problems": 4.0,
+    # POPRAWKA/UWAGA: te dwa scenariusze uzywaja REALNYCH danych 10-czujnikowych
+    # analizowanych przez fuse() (nie fuse_calibrated()) - tak jak wszystkie demo
+    # ponizej, to zwykly "replay" calej nagranej historii, nie live-symulacja
+    # krok-po-kroku (patrz monitor.py + auto_calibrate() dla tamtej wersji).
+    # Prog 6.0 dobrano EMPIRYCZNIE z realnych danych: healthy E(t) dla obu
+    # silnikow miesci sie w 1.3-4.7, a silnik 1 tuz przed awaria dochodzi do E~9.6
+    # - 6.0 poprawnie odroznia oba przypadki (zweryfikowano bezposrednio, nie
+    # zgadywane).
+    "real_engine_1_full": 6.0,
+    "real_engine_2_live": 6.0,
 }
 
 
@@ -175,12 +191,50 @@ def duty_cycle_problems(seed=0, n=360, period=30):
     return t, {"current": curr, "pressure": pres}
 
 
+_REAL_ENGINE_SENSOR_IDX = [2, 3, 4, 7, 11, 12, 15, 17, 20, 21]
+
+
+def _load_real_engine(filename):
+    """Wczytuje surowy plik C-MAPSS (26 kolumn: unit, cycle, 3 ustawienia
+    operacyjne, 21 czujnikow) i zwraca (t, {sensor_N: wartosci}) dla
+    podzbioru 10 czujnikow uznanych w literaturze za informacyjne dla
+    FD001 - dokladnie ten sam podzbior, ktorego uzywano przy weryfikacji
+    calibrate()/auto_calibrate() na tych danych (patrz README, sekcje
+    "Blad 1"-"Blad 5")."""
+    path = os.path.join(DATA_DIR, filename)
+    with open(path) as f:
+        rows = [line.split() for line in f if line.strip()]
+    cols = [4 + i for i in _REAL_ENGINE_SENSOR_IDX]
+    t = np.array([float(r[1]) for r in rows])
+    sensors = {
+        f"sensor_{i}": np.array([float(r[c]) for r in rows])
+        for i, c in zip(_REAL_ENGINE_SENSOR_IDX, cols)
+    }
+    return t, sensors
+
+
+def real_engine_1_full(seed=0):
+    """Silnik nr 1, NASA C-MAPSS FD001 - REALNE dane, PELNY przebieg
+    run-to-failure (192 cykle). `seed` ignorowany (dane nie sa syntetyczne)."""
+    return _load_real_engine("cmapss_fd001_unit1_full_192cycles.txt")
+
+
+def real_engine_2_live(seed=0):
+    """Silnik nr 2, NASA C-MAPSS FD001 - REALNE dane, TYLKO pierwsze 85
+    cykli (nie caly przebieg do awarii - patrz data/real_engines/README.md
+    po wyjasnienie tego ograniczenia). Silnik jest w tym oknie zdrowy.
+    `seed` ignorowany (dane nie sa syntetyczne)."""
+    return _load_real_engine("cmapss_fd001_unit2_partial_85cycles.txt")
+
+
 GENERATORS = {
     "bearing_wear": bearing_wear,
     "pump_seizure": pump_seizure,
     "uneven_motor_rotation": uneven_motor_rotation,
     "resonance_loose_parts": resonance_loose_parts,
     "duty_cycle_problems": duty_cycle_problems,
+    "real_engine_1_full": real_engine_1_full,
+    "real_engine_2_live": real_engine_2_live,
 }
 
 

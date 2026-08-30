@@ -6,6 +6,38 @@ predykcja czasu do awarii i health-score (`timdr_industrial_predict.py`),
 plus lokalny dashboard z REST API (`api.py` + `static/dashboard.html`),
 uruchamiany jednym kliknięciem przez `run.bat`.
 
+## 🔁 Monitoring ciągły / okresowy (`monitor.py`)
+
+Dashboard wymaga ręcznego kliknięcia "uruchom analizę" - `monitor.py`
+robi to samo automatycznie, na rosnącym pliku CSV od prawdziwej
+maszyny, w jednym z dwóch trybów:
+
+- **Ciągły** - proces działa cały czas, sprawdza plik co `--interval`
+  sekund (Ctrl+C kończy):
+  `python monitor.py --csv maszyna_live.csv --healthy-ref rozruch_zdrowy.csv --interval 5`
+- **Okresowy** - jedno sprawdzenie i wyjście, do wywołania z zewnętrznego
+  harmonogramu (cron / Harmonogram zadań Windows / systemd timer):
+  `python monitor.py --csv maszyna_live.csv --once` (po pierwszym
+  uruchomieniu z `--healthy-ref` kalibracja jest zapisana do
+  `timdr_calibration.json` i kolejne `--once` jej nie potrzebują).
+
+Przy przenoszeniu na NOWY, nieznany silnik zamiast ręcznie wskazywać
+`--healthy-ref` można użyć `--auto-calibrate` - automatycznie znajdzie
+najbardziej stabilne podokno w już zebranych danych zamiast zakładać,
+że pierwsze próbki są zdrowe (patrz "Błąd 4" niżej, dlaczego to ważne):
+`python monitor.py --csv maszyna_live.csv --auto-calibrate --once`
+
+Każde sprawdzenie: wczytuje CAŁĄ historię z pliku CSV (nie tylko nowe
+wiersze - `fuse_calibrated()`/`predict_failure_smoothed()` potrzebują
+pełnego kontekstu), liczy health-score i unormowany TTF, drukuje jedną
+linię statusu i zapisuje pełny stan do `timdr_status.json` (health,
+TTF, `confirmed`, `alert`) - stąd może to odebrać dashboard albo własny
+system alarmowania, bez zmiany tego skryptu. Zweryfikowano end-to-end
+na realnych danych C-MAPSS: `--once` na pełnych 192 cyklach silnika
+poprawnie zwraca `health=0.000`, `TTF=0.0`, `ALARM` (prawdziwy koniec
+życia), a tryb ciągły z rosnącym plikiem live poprawnie odświeża wynik
+co zadany interwał.
+
 ## 🖥️ Dashboard + API
 
 ![Dashboard - odpowiedź API z pełną analizą](screenshot_dashboard_api.png)
@@ -223,6 +255,234 @@ własnej historii /5) nie miała żadnego związku z `threshold` używanym w
 różne wartości E. Naprawiono: health_score liczy medianę z ostatnich
 `window` próbek (domyślnie 20) względem TEGO SAMEGO `threshold`, co
 `predict_failure()`.
+
+## 🧪 Pierwszy test na PRAWDZIWYCH danych przemysłowych (NASA C-MAPSS) i dwa nowe błędy stąd znalezione
+
+Pierwszy test fuzji wielu czujników na realnym urządzeniu (nie demo):
+NASA C-MAPSS FD001, silnik turbowentylatorowy nr 1, pełna trajektoria
+run-to-failure, 192 prawdziwe cykle, 10 z 21 realnych czujników
+(znany w literaturze niestały/informatywny podzbiór dla FD001).
+
+**Wynik pozytywny (metryka pre-zarejestrowana przed uruchomieniem)**:
+korelacja Spearmana fuzowanego E(t) z numerem cyklu: rho=0,39,
+p=2×10⁻⁸ - realny, istotny statystycznie sygnał degradacji. Kontrola
+negatywna (czujnik znany jako stały w FD001) dała zerową wariancję,
+zgodnie z oczekiwaniem. Detektor anomalii złapał 27 zdarzeń, 100% w
+ostatnich 20% życia silnika.
+
+### Błąd 1: samoreferencyjne `fuse()` daje fałszywy alarm krytyczny na zdrowym rozruchu
+
+Przy symulacji PRZYCZYNOWEJO monitoringu na żywo (statystyki liczone
+tylko z danych dostępnych DO danego cyklu, bez podglądu przyszłości -
+pierwsza wersja testu miała tu błąd look-ahead, złapany i poprawiony
+przed wyciągnięciem wniosków): na cyklu 10 - praktycznie nowym, zdrowym
+silniku - `health_score()`/`predict_failure()` zwracały
+`health_score=0.000`/`TTF=0` ("już awaria, teraz"). Przyczyna: MAD-z
+liczone z bardzo krótkiego, biegnącego okna jest niestabilne przy małej
+próbie.
+
+**Naprawiono przez `calibrate()`/`fuse_calibrated()`** (nowe metody w
+`timdr_industrial_fusion.py`): zamiast liczyć median/MAD z bieżącego,
+mogącego być zbyt krótkiego okna, kalibruje się je RAZ z osobno
+dostarczonego zdrowego zbioru referencyjnego (test odbiorczy, znana
+zdrowa faza pracy). To rozwiązuje problem inaczej niż "poczekaj na
+więcej próbek" (co ukryłoby prawdziwą usterkę, gdyby wystąpiła od
+razu) - zweryfikowano wprost dwoma testami jednostkowymi i jednym na
+realnych danych: zdrowy rozruch nie daje już fałszywego alarmu, a
+wstrzyknięta prawdziwa usterka od pierwszej próbki nadal wychodzi
+natychmiast.
+
+### Błąd 2 (głębszy, znaleziony przy tym samym teście): stały próg 3.0 nie skaluje się z liczbą fuzowanych czujników
+
+`E=sqrt(sum(Z**2))` w oryginalnym `fuse()` rośnie z **pierwiastkiem z
+liczby czujników** nawet dla czysto zdrowych danych - to własność
+rozkładu chi z k stopniami swobody, nie usterka konkretnych danych.
+Zweryfikowano na realnym silniku: mediana E w zdrowym oknie kalibracji
+przy k=4 czujnikach (jak oryginalne demo) = 1,73 (blisko
+teoretycznego sqrt(4)=2,0); przy k=10 czujnikach = 3,03 (blisko
+sqrt(10)=3,16). Czyli dokładnie ta sama zdrowa maszyna z większą liczbą
+podłączonych czujników wygląda na coraz bardziej "chorą" przy tym samym
+stałym progu 3.0 - wyłącznie z powodu liczby kanałów, nie stanu
+maszyny.
+
+**Naprawiono w `fuse_calibrated()`** (nie w `fuse()` - tam zostawiono
+oryginalną skalę dla wstecznej zgodności z już zweryfikowanymi progami
+5 scenariuszy demo, wszystkie zbudowane na k=4): `E=sqrt(mean(Z**2))`
+(RMS zamiast sumy), więc zdrowa wartość E oscyluje koło 1,0 niezależnie
+od liczby fuzowanych czujników. Zweryfikowano testem jednostkowym
+(k=3 vs 6 vs 12 zdrowych kanałów, mediana E w granicach 1,5x) oraz na
+realnym silniku: po obu poprawkach health_score poprawnie utrzymuje się
+wysoko (0,55-0,69) przez pierwsze ~100 zdrowych cykli, po czym spada
+monotonicznie do 0,000 dokładnie w realnej fazie końca życia silnika
+(cykl 150-192).
+
+### Błąd 3 (uzupełnienie na wyraźną prośbę): TTF trzeba unormować czasem - opóźnienie + mediana z okresu
+
+Powyższy problem (TTF przeskakujące np. inf → 87,7 → inf → 737,4 → inf
+na fizycznie tej samej, zdrowej fazie silnika) nie był jeszcze
+naprawiony - to osobna usterka od błędów 1-2 (tamte dotyczyły SKALI E,
+ta dotyczy NIESTABILNOŚCI pojedynczego punktowego dopasowania regresji
+na prawie płaskim/zaszumionym sygnale).
+
+**Naprawiono nową metodą `predict_failure_smoothed()`** w
+`timdr_industrial_predict.py`, dwoma mechanizmami naraz:
+- **opóźnienie** - przy historii krótszej niż `min_len` (domyślnie 5)
+  w ogóle nie próbuje się szacować TTF (zwraca `inf`, `confirmed=False`)
+  - zbyt krótka historia to gwarantowany szum, nie sygnał;
+- **mediana z okresu** - zamiast jednego punktowego dopasowania, liczy
+  `predict_failure()` osobno dla każdego z ostatnich `smooth_window`
+  (domyślnie 10) kończących punktów historii i zwraca MEDIANĘ tych
+  surowych oszacowań (mediana, nie średnia arytmetyczna - żeby
+  pojedyncze `inf` nie psuło wyniku); dodatkowo `confirmed=False`, jeśli
+  większość ostatnich surowych oszacowań to `inf` (brak wykrywalnego
+  trendu), zamiast zwracać pojedynczy, potencjalnie przypadkowy wynik.
+
+Zweryfikowano na realnym silniku C-MAPSS: w fazie zdrowej (cykle 20-50)
+surowy TTF dawał losowe skoki (inf, 737,4, inf), unormowana wersja
+poprawnie odpowiada "`confirmed=False`" zamiast zgadywać konkretną
+liczbę. W fazie realnej degradacji (cykl 100+) obie wersje się zgadzają
+co do rzędu wielkości i obie poprawnie łapią krytyczny stan pod koniec
+życia silnika (cykl 180-192). Dodatkowy test jednostkowy potwierdza:
+wariancja szacowań TTF w czasie jest niższa dla wersji unormowanej niż
+dla pojedynczego odczytu na tym samym zaszumionym, płaskim sygnale.
+
+**Wciąż otwarte, uczciwie nie ukrywane**: `confirmed=False` samo w
+sobie nie mówi, CZY maszyna jest zdrowa, tylko że model nie ma jeszcze
+wystarczająco spójnego trendu, by podać liczbę - to świadomie
+konserwatywne "nie wiem", nie "wszystko OK". Dobór `smooth_window=10`
+nie był strojony pod ten konkretny silnik (żeby uniknąć post-hoc
+dopasowania do wyniku), ale też nie był testowany na innym realnym
+przebiegu - może wymagać dostrojenia do dynamiki konkretnej maszyny.
+
+Pliki: `timdr_industrial_fusion.py` (`calibrate()`, `fuse_calibrated()`),
+`timdr_industrial_predict.py` (`predict_failure_smoothed()`),
+`test_timdr_industrial_fusion.py` (4 nowe testy),
+`test_timdr_industrial_predict.py` (3 nowe testy).
+
+### Błąd 4 (uzupełnienie na wyraźną prośbę): autokalibracja przed uruchomieniem na innym silniku
+
+`calibrate()` wymaga PODANIA zdrowego okresu odniesienia - dobre przy
+znanym, ustabilizowanym urządzeniu, ale niewygodne (i ryzykowne) przy
+przenoszeniu na nowy, nieznany silnik: jeśli operator poda jako
+"zdrowy" fragment, który akurat jest przejściowy (rozruch, rozpędzanie),
+kalibracja dziedziczy ten błąd. Zweryfikowano wprost na emulowanym
+OBD-II (patrz sekcja monitoringu na żywo poniżej): silnik przyspieszający
+od 620 do 1000+ obr/min podczas "zdrowej" referencji dawał
+`health_score=0,10`, `ALARM` po 25 próbkach, mimo braku jakiejkolwiek
+usterki - bo KAŻDA kolejna próbka na tej samej rampie musi wyglądać na
+odchylenie od punktu wziętego z początku rampy.
+
+**Naprawiono `auto_calibrate()`** w `timdr_industrial_fusion.py`: zamiast
+brać pierwsze próbki na wiarę, przeszukuje pierwsze `probe_window` próbek
+w poszukiwaniu najbardziej STABILNEGO ciągłego podokna (najniższa łączna
+znormalizowana zmienność - `std/|mediana|` sumowane po czujnikach) i
+kalibruje z niego. `monitor.py` ma teraz `--auto-calibrate` jako
+alternatywę dla `--healthy-ref`.
+
+Zweryfikowano na realnym silniku C-MAPSS: wybrało okno zaczynające się
+na cyklu 30 (nie 0), z niższą zmiennością niż naiwne pierwsze 20 cykli -
+health_score po tym pozostaje wysoki (0,64-0,71) przez pierwsze ~50
+cykli i poprawnie spada do 0,000 na realnym końcu życia silnika.
+
+**Uczciwie zweryfikowano też przypadek, w którym autokalibracja NIE
+POMAGA w pełni** - na tym samym emulowanym OBD-II (cała 80-próbkowa
+sesja to jedna ciągła rampa przyspieszenia, bez ŻADNEGO prawdziwie
+stabilnego odcinka): autokalibracja wybrała obiektywnie lepsze okno
+(zmienność 0,156 vs 0,654 dla naiwnego pierwszego - 4x lepiej), ale
+mimo to system ostatecznie zgłasza `ALARM`, bo dane naprawdę nigdy się
+nie stabilizują. To fundamentalne ograniczenie DANYCH, nie coś, co
+dowolny algorytm kalibracji może naprawić - `auto_calibrate()` zwraca
+pełną diagnostykę (`chosen_start`, `variability_chosen` vs
+`variability_naive_first`), żeby ten wybór był sprawdzalny, a nie
+ukryty w czarnej skrzynce.
+
+Pliki: `timdr_industrial_fusion.py` (`auto_calibrate()`), `monitor.py`
+(`--auto-calibrate`, `--calib-probe`, `--calib-window`),
+`test_timdr_industrial_fusion.py` (3 nowe testy).
+
+### Błąd 5 (uzupełnienie na wyraźną prośbę): ile próbek trzeba do stabilizacji + auto-walidacja sprawdzonymi testami statystycznymi
+
+Dwa pytania w jednym: (1) ile próbek system faktycznie potrzebuje, żeby
+jego statystyki kalibracyjne się "wygładziły", i (2) czy istnieje
+sprawdzona (nie domowej roboty) metoda auto-walidacji wybranego okna
+kalibracyjnego.
+
+**(2) Auto-walidacja**: dodano `_mann_kendall()` - standardowy,
+nieparametryczny test na trend monotoniczny (Mann 1945, Kendall 1975),
+napisany ręcznie wprost ze wzoru (statystyka S z sumy znaków par,
+wariancja `n(n-1)(2n+5)/18`, z-statystyka z korekcją ciągłości), zamiast
+domowej heurystyki. `validate_window()` uruchamia go na każdym czujniku
+w wybranym oknie kalibracyjnym i odrzuca okno, jeśli którykolwiek
+czujnik wykazuje istotny statystycznie trend (p<0,05) - okno
+kalibracyjne z założenia ma reprezentować STABILNY stan, a trend w
+środku niego oznacza, że okno wcale nie jest tak stabilne, jak sugerował
+sam wskaźnik zmienności. Wpięto to bezpośrednio w `auto_calibrate()`,
+które teraz zwraca dodatkowo `validated` i `validation_detail`.
+
+Zweryfikowano na realnym silniku C-MAPSS: okno wybrane przez
+`auto_calibrate()` (cykle 30-50, najniższa zmienność) dostaje
+`validated: False` - jeden z 10 czujników (S=-65, p=0,038) wykazuje
+istotny trend nawet w tym nominalnie najlepszym oknie. To NIE jest błąd
+kodu - to uczciwe, prawdziwe odkrycie: silniki C-MAPSS to dane
+"run-to-failure" zaprojektowane tak, by degradacja była ciągła od
+początku życia silnika, więc nawet "najzdrowszy" dostępny fragment może
+mieć statystycznie wykrywalny (choć praktycznie mały) trend. Mann-Kendall
+robi dokładnie to, do czego został zaprojektowany - wykrywa trend, nawet
+słaby, przy wystarczającej liczbie próbek. To rozróżnienie "istotne
+statystycznie" vs "istotne praktycznie" trzeba rozumieć przy interpretacji
+wyniku, a nie traktować `validated: False` jako "system nie działa".
+
+**(1) Ile próbek do stabilizacji**: dodano `calibration_convergence()` -
+śledzi względną zmianę wektora median (po wszystkich czujnikach) w miarę
+wzrostu liczby próbek i wymaga kilku kolejnych potwierdzeń małej zmiany
+pod rząd, zanim uzna zbieżność (analogia do testów zbieżności Monte
+Carlo / batch-means).
+
+**Prawdziwy błąd znaleziony i naprawiony w trakcie tej pracy**: pierwsza
+wersja normalizowała zmianę względem BIEŻĄCEJ (rosnącej z n) mediany.
+Na realnych danych OBD-II (ciągła rampa RPM 620→2200+, bez żadnego
+spłaszczenia) dawało to `n_required=45` - FAŁSZYWĄ zbieżność, mimo że
+mediana rosła liniowo bez przerwy (potwierdzone wprost: mediana dla
+n=5..80 to 660, 710, 810, 910, 1010, 1060, 1110, ... - czysta linia
+prosta). Przyczyna: stały krok bezwzględny (np. +50) dzielony przez
+CORAZ WIĘKSZY mianownik (rosnącą medianę) w końcu spada poniżej progu
+5%, mimo że sygnał wcale się nie ustabilizował - to fałszywa zbieżność
+wynikająca z rosnącego punktu odniesienia, nie z faktycznego wypłaszczenia.
+Znaleziono to samodzielnie przy testowaniu, nie zostało zgłoszone przez
+użytkownika.
+
+**Naprawiono**: mianownik to teraz STAŁA skala rozrzutu (MAD, liczona
+raz z całego dostępnego okresu próbnego), a nie rosnąca mediana. Po
+naprawie: ta sama rampa OBD poprawnie zwraca `n_required=None` (rel_change
+utrzymuje się na stałym poziomie ~8,4%, nigdy nie spada poniżej progu -
+dokładnie tak, jak powinno wyglądać dla sygnału bez żadnej stabilizacji).
+Dodano dedykowany test regresyjny
+(`test_calibration_convergence_rampa_z_duzym_punktem_startowym_nie_zbiega_falszywie`)
+i potwierdzono wprost, że STARA (błędna) formuła na tym samym teście
+zwraca `n_required=50` (fałszywy pozytyw), a naprawiona - `None`.
+
+Wyniki po naprawie na realnych danych:
+
+- **OBD-II, ciągła rampa (nigdy się nie stabilizuje)**: `n_required=None` - poprawnie.
+- **C-MAPSS, realny silnik, 10 czujników, pierwsze 100 cykli, próg 5%**:
+  `n_required=None` - silnik NIE stabilizuje się w sensie ścisłym w
+  pierwszych 100 cyklach (zgodne z odkryciem Mann-Kendalla wyżej - ciągła,
+  niska-amplitudowa degradacja od początku). Przy złagodzeniu progu do
+  10% (mniej rygorystyczne kryterium "wystarczająco stabilne"):
+  `n_required=80`.
+- **Kontrola pozytywna (sztuczny szum wokół stałej, brak trendu)**:
+  `n_required=20` - szybka, poprawna zbieżność, jak oczekiwano.
+
+Uczciwy wniosek: nie ma jednej uniwersalnej liczby "ile próbek trzeba" -
+zależy to od tego, jak blisko prawdziwie stabilnego stanu jest urządzenie
+w ogóle. System teraz to POKAZUJE (konkretną liczbę albo `None`) zamiast
+zakładać z góry stałą liczbę próbek rozruchowych.
+
+Pliki: `timdr_industrial_fusion.py` (`calibration_convergence()`,
+`_mann_kendall()`, `validate_window()`, `auto_calibrate()` teraz zwraca
+też `validated`/`validation_detail`), `test_timdr_industrial_fusion.py`
+(11 nowych testów, w tym pozytywne i negatywne kontrole dla
+Mann-Kendalla oraz dedykowany test regresyjny na opisany wyżej błąd).
 
 ## ✅ Co było już poprawnie zaprojektowane (bez zmian)
 
