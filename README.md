@@ -3,70 +3,38 @@
 Predictive maintenance metodą TIMDR: fuzja wielu czujników maszyny w
 jeden sygnał "energii stanu" E(t) (`timdr_industrial_fusion.py`), plus
 predykcja czasu do awarii i health-score (`timdr_industrial_predict.py`),
-plus lokalny dashboard z REST API (`api.py` + `static/dashboard.html`),
-uruchamiany jednym kliknięciem przez `run.bat`.
+plus dispatcher priorytetyzujący te wyniki w jedno zdarzenie
+(`timdr_industrial_trigger.py`), plus lokalny dashboard z REST API
+(`api.py` + `static/dashboard.html`), uruchamiany jednym kliknięciem
+przez `run.bat`.
 
-> 📖 Pełna historia znalezionych błędów, przyczyn i poprawek (w tym
-> testy na realnych danych) jest wydzielona do osobnego pliku:
-> **[`HISTORIA_BLEDOW.md`](HISTORIA_BLEDOW.md)**. Ten plik opisuje
-> wyłącznie, jak używać programu.
+## 🚨 `timdr_industrial_trigger.py` — jedno priorytetyzowane zdarzenie
 
-## 🔴 Program działa NA ŻYWO, na prawdziwej maszynie (`monitor.py`)
+Dispatcher NIE liczy własnej statystyki - tylko woła już przetestowane
+`TIMDRIndustrialFusion.twist()`/`anomalies()` i
+`TIMDRIndustrialPredict.predict_failure()` i mapuje ich łączny wynik na
+jedno zdarzenie (typ + lokalizacja + komunikat), według priorytetu:
 
-To nie tylko demo do przeglądania w przeglądarce — `monitor.py`
-podłącza cały pipeline TIMDR (fuzja + health-score + TTF) do
-**rosnącego pliku CSV z prawdziwego urządzenia** i pracuje w tle w
-jednym z dwóch trybów:
+**FAILURE_IMMINENT** (przewidywany TTF ≤ `alert_ttf_seconds`, domyślnie
+3600s — najbardziej actionable, explicit prognoza przyszłości) >
+**STRUCTURE** (`twist` — nagła zmiana energii stanu E(t)) > **ANOMALY**
+(pojedyncza statystyczna anomalia w E(t)) > **NONE**.
 
-- **Ciągły** — proces działa cały czas, sprawdza plik co `--interval`
-  sekund (Ctrl+C kończy):
-  ```
-  python monitor.py --csv maszyna_live.csv --healthy-ref rozruch_zdrowy.csv --interval 5
-  ```
-- **Okresowy** — jedno sprawdzenie i wyjście, do wywołania z zewnętrznego
-  harmonogramu (cron / Harmonogram zadań Windows / systemd timer):
-  ```
-  python monitor.py --csv maszyna_live.csv --once
-  ```
-  (po pierwszym uruchomieniu z `--healthy-ref` kalibracja jest zapisana
-  do `timdr_calibration.json` i kolejne `--once` jej nie potrzebują —
-  nie trzeba podawać referencji przy każdym wywołaniu).
+```python
+from timdr_industrial_trigger import IndustrialTrigger
 
-**Kalibracja bez ręcznego wskazywania zdrowego okresu**: przy
-przenoszeniu na nowy, nieznany silnik zamiast `--healthy-ref` można użyć
-`--auto-calibrate` — automatycznie znajdzie najbardziej stabilne podokno
-w już zebranych danych, zamiast zakładać, że pierwsze próbki są zdrowe:
-```
-python monitor.py --csv maszyna_live.csv --auto-calibrate --once
+trigger = IndustrialTrigger(alert_ttf_seconds=3600.0)
+result = trigger.analyze(t, E, threshold=60.0, window=60)
+print(result.as_dict())
+# {'triggered': True, 'type': 'anomaly', 'location': 5, 'message': '...'}
 ```
 
-Każde sprawdzenie: wczytuje CAŁĄ historię z pliku CSV (nie tylko nowe
-wiersze), liczy health-score i unormowany TTF, drukuje jedną linię
-statusu i zapisuje pełny stan do `timdr_status.json` (health, TTF,
-`confirmed`, `alert`) — stąd może to odebrać dashboard (patrz niżej)
-albo własny system alarmowania, bez zmiany tego skryptu. Dodatkowo, przy
-samej kalibracji, zapisuje RAZ diagnostykę do
-`timdr_calibration_report.json`: ile próbek teoretycznie potrzeba do
-stabilizacji statystyk (`calibration_convergence()`) oraz czy wybrane
-okno faktycznie jest stabilne wg testu Manna-Kendalla
-(`validate_window()`) — patrz sekcja dashboardu niżej, gdzie to widać.
-
-Zweryfikowano end-to-end na realnych danych NASA C-MAPSS (dwa niezależne
-silniki turbowentylatorowe) oraz na realnym protokole OBD-II
-(`obd_source.py` — most z prawdziwego adaptera ELM327/python-obd do
-formatu CSV, testowany wobec niezależnego emulatora protokołu, gotowy
-do użycia z prawdziwym autem bez zmian w kodzie).
-
-### Podłączenie realnego OBD-II (samochód/silnik)
-
-```
-python obd_source.py --port /dev/ttyUSB0 --csv silnik_live.csv --interval 1
-python monitor.py --csv silnik_live.csv --auto-calibrate --interval 5
-```
-
-`--port` to prawdziwy port szeregowy adaptera ELM327 (USB/Bluetooth) —
-`COM5` na Windows, `/dev/ttyUSB0` na Linuksie. `--list-supported` pokaże,
-jakie PID-y faktycznie oferuje dany adapter/pojazd.
+`twist()`/`anomalies()` mają własne, zakodowane na stałe progi (3.5 /
+3.0 odchylenia MAD) — dispatcher świadomie NIE udaje, że może je
+przestawić parametrem konstruktora, bo takiego parametru nie da się
+faktycznie wpiąć w te metody (martwy parametr — błąd znaleziony
+wcześniej w `TIMDR-Security-Module`). Wpięty w `/api/analyze` (pole
+`"trigger"` w odpowiedzi JSON) i w dashboardzie (karta "Trigger").
 
 ## 🖥️ Dashboard + API
 
@@ -74,7 +42,7 @@ jakie PID-y faktycznie oferuje dany adapter/pojazd.
 
 Uruchomienie: `run.bat` (Windows, instaluje zależności i otwiera
 przeglądarkę) albo ręcznie `python api.py` + wejście na
-`http://127.0.0.1:5000`. Wszystko działa lokalnie — żadne dane nie
+`http://127.0.0.1:5000`. Wszystko działa lokalnie - żadne dane nie
 opuszczają komputera.
 
 - **Karty stanu**: health-score (z paskiem, kolor zależny od progu
@@ -83,41 +51,56 @@ opuszczają komputera.
 - **Wykres E(t)** z linią progu awarii i zaznaczonymi anomaliami/twistami.
 - **Wykres trendu** (nachylenie E w oknie kroczącym).
 - **Wykresy surowych czujników** (siatka, po jednym na czujnik).
-- **Wybór scenariusza demo** (dropdown) — 5 syntetycznych awarii + 2
-  realne silniki NASA C-MAPSS (patrz sekcja niżej), próg `threshold`
-  ustawia się automatycznie na wartość sugerowaną dla wybranego
-  scenariusza.
-- **📄 Wczytaj CSV** — podłączenie własnych danych (nie tylko demo):
+- **Wybór scenariusza demo** (dropdown) - 5 gotowych, zweryfikowanych
+  syntetycznych awarii (patrz niżej), próg `threshold` ustawia się
+  automatycznie na wartość sugerowaną dla wybranego scenariusza.
+- **📄 Wczytaj CSV** - podłączenie własnych danych (nie tylko demo):
   plik z nagłówkiem, kolumna czasu (domyślnie `t`, konfigurowalna w
   polu obok przycisku) + dowolna liczba kolumn numerycznych jako
   czujniki. Bez kolumny czasu o podanej nazwie używany jest indeks
   wiersza.
-- **📡 Panel monitoringu na żywo** — jeśli w tle działa `monitor.py`,
-  dashboard pokazuje na bieżąco (odświeżanie co 5s) jego wynik: liczbę
-  próbek, health, TTF i alarm. Panel jest niewidoczny, jeśli
-  `monitor.py` nie jest uruchomiony. Dodatkowo, w trybie ciągłym
-  (`--interval`), panel pokazuje 🟢 live / 🔴 offline — to ROZRÓŻNIENIE,
-  nie to samo co "czy monitor.py działa": `monitor.py` może grzecznie
-  odpytywać ten sam, już nierosnący plik CSV co `--interval` sekund
-  (np. gdy adapter OBD-II się rozłączył), a badge poprawnie pokaże
-  🔴 offline mimo że sam proces monitorujący wciąż żyje — zweryfikowane
-  wprost: symulacja rosnącego, potem zatrzymanego, potem znów rosnącego
-  pliku CSV poprawnie przełącza badge live→offline→live.
-- **🧪 Panel diagnostyki kalibracji** — jednorazowa informacja z
-  MOMENTU kalibracji (nie odświeża się co 5s, żeby nie zaszumiać
-  widoku): jaką metodą skalibrowano, ile próbek do stabilizacji wg
-  `calibration_convergence()`, i czy wybrane okno przeszło walidację
-  Manna-Kendalla.
-- Analiza uruchamia się **automatycznie** po wybraniu scenariusza,
-  wczytaniu CSV, albo zmianie `threshold`/`window` — nie trzeba osobnego
-  przycisku "uruchom analizę"; pole obok pól liczbowych pokazuje
-  "⏳ analizowanie…" / "✓ przeanalizowano HH:MM:SS".
+- Przyciski: wczytaj dane demo / wczytaj CSV / uruchom analizę, pola
+  `threshold`/`window`/nazwa kolumny czasu.
 
-## 🎲 Scenariusze demo (`demo_scenarios.py`)
+### 🐛 Poprawka: wykresy (w tym czujniki) nie pokazywały się w ogóle
 
-5 syntetycznych awarii odpowiadających typowym trybom uszkodzeń, każdy
-zweryfikowany empirycznie, że faktycznie uruchamia deklarowany detektor
-(`test_demo_scenarios.py`), plus 2 REALNE silniki z NASA C-MAPSS:
+Pierwsza wersja dashboardu ładowała Chart.js z zewnętrznego CDN
+(`cdnjs.cloudflare.com`). Jeśli przeglądarka nie ma dostępu do tego
+akurat adresu (firewall firmowy, offline, DNS/proxy) - CDN nie ładuje
+się CICHO, `Chart` zostaje niezdefiniowane, i **wszystkie** wykresy
+(nie tylko czujniki - też E(t), trend, a nawet reszta inicjalizacji
+strony) przestają działać bez żadnego widocznego komunikatu w UI
+(błąd trafia tylko do konsoli deweloperskiej przeglądarki). Zweryfikowano
+wprost w tym środowisku: próba pobrania tego samego pliku z CDN
+zablokowana przez proxy sandboxa - dokładnie ten typ awarii sieciowej,
+na który dashboard był podatny.
+
+Naprawiono przez usunięcie zależności od CDN całkowicie: wykresy
+rysowane są własnym, ok. 100-liniowym silnikiem opartym o `<canvas>` i
+2D Context API (funkcja `drawChart()` w `dashboard.html`) - zero
+zależności zewnętrznych, więc strona działa identycznie z internetem i
+bez niego. Dodatkowo każdy krok inicjalizacji (`loadScenarios`,
+`loadDemo`, `runAnalyze`) ma teraz `.catch()`, który wyświetla błąd w
+widocznym polu `#err` zamiast cichego `Uncaught (in promise)` w
+konsoli - jeśli coś pójdzie nie tak, będzie to widoczne na stronie, nie
+tylko w devtools.
+
+Zweryfikowano: (1) `node --check` - składnia, (2) uruchomienie
+faktycznej logiki `drawChart()`/`parseCsv()` w Node z podstawionym
+fałszywym `canvas`/`document` (7 przypadków: normalny sygnał, puste
+dane, seria z markerami anomalii/twist + progiem, wartości
+null/NaN/Infinity, pojedynczy punkt, wąski kontener, błędny CSV) - żaden
+nie rzuca wyjątku, (3) porównanie wszystkich `getElementById()` w JS z
+`id=` w HTML - brak rozbieżności, (4) `grep` po `http`/`https` w
+`dashboard.html` - zero zewnętrznych adresów URL.
+
+### 🎲 5 scenariuszy demo (`demo_scenarios.py`)
+
+Zamiast jednego generycznego zestawu danych - 5 syntetycznych awarii
+odpowiadających "Co wykrywa TIMDR-Industrial-Fusion w praktyce" z
+oryginalnego zgłoszenia, każdy **zweryfikowany empirycznie**, że
+faktycznie uruchamia deklarowany detektor (nie tylko założony -
+sprawdzony pełnym pipeline'em Fusion+Predict, `test_demo_scenarios.py`):
 
 | Scenariusz | Pokazuje | Czujniki |
 |---|---|---|
@@ -126,53 +109,173 @@ zweryfikowany empirycznie, że faktycznie uruchamia deklarowany detektor
 | `uneven_motor_rotation` | rytm (okres 12) + odosobnione skoki | current, vibration |
 | `resonance_loose_parts` | rytm (okres 20) + twist na każdym uderzeniu | temp, vib, pressure, current |
 | `duty_cycle_problems` | rytm (okres 30) + anomalia + trend w drugiej połowie | current, pressure |
-| `real_engine_1_full` | 🛩️ REALNE dane — pełny przebieg run-to-failure, 192 cykle | 10 czujników C-MAPSS |
-| `real_engine_2_live` | 🛩️ REALNE dane — pierwsze 85 cykli, silnik wciąż zdrowy (live) | 10 czujników C-MAPSS |
 
-Uwagi dotyczące projektowania własnych scenariuszy/czujników (znalezione
-nieoczywiste właściwości metody median/MAD) — patrz `HISTORIA_BLEDOW.md`.
+Po drodze znaleziono i skorygowano 3 nieoczywiste właściwości fuzji
+wielu czujników (nie błędy w kodzie - właściwości samej metody
+median/MAD, warte znajomości przy projektowaniu własnych scenariuszy):
 
-## 📊 Realne dane silników (`data/real_engines/`)
+1. **Rozcieńczanie rytmu przez niezwiązane czujniki**: `_mad_z()`
+   normalizuje każdą cechę do porównywalnej skali - to dobra poprawka
+   przeciw dominacji skali, ale oznacza, że czysto szumowy, niezwiązany
+   z badanym zjawiskiem czujnik wnosi do E(t) TYLE SAMO znormalizowanej
+   "energii" co prawdziwy sygnał okresowy. Zweryfikowano: dodanie 2
+   niezwiązanych czujników (szum) do sygnału z czystą periodycznością
+   zmniejszało `rhythm_score` z 0.73 do 0.24 (poniżej progu 0.4).
+   Rozwiązanie: fuzuj czujniki fizycznie związane z badanym zjawiskiem.
+2. **Ekstremalne odstające punkty niszczą wykrywalność rytmu**:
+   znormalizowana autokorelacja nie jest odporna na pojedyncze,
+   bardzo duże wartości odstające (dominują wariancję w mianowniku) -
+   zbyt duży/szeroki skok "awarii" potrafił zrzucić `rhythm_score` z
+   ~0.8 do 0.0, mimo niezmienionej periodyczności reszty sygnału.
+3. **Powolny dryf bazowy ginie w lokalnej zmienności**: `_mad_z()`
+   mierzy odległość od GLOBALNEJ (nie ruchomej) mediany - dryf słabszy
+   niż lokalne wahania cyklu (np. duty-cycle) może zostać "wchłonięty"
+   i nie być widoczny jako trend w ogóle, nawet gdy realnie rośnie.
 
-Dwa prawdziwe silniki NASA C-MAPSS FD001 leżą w repo gotowe do użycia —
-zarówno przez dashboard (jako demo, patrz wyżej), jak i bezpośrednio
-przez `monitor.py`:
-
-```
-python monitor.py --csv data/real_engines/cmapss_unit1_live_192cycles.csv --auto-calibrate --once
-python monitor.py --csv data/real_engines/cmapss_unit2_live_85cycles.csv --auto-calibrate --once
-```
-
-Silnik 1 ma pełny przebieg do awarii; silnik 2 to tylko pierwsze 85
-cykli (celowa symulacja "danych na żywo" — jeszcze nie wiadomo, czy/kiedy
-dojdzie do awarii). Pochodzenie danych i pełne wyjaśnienie ograniczenia
-silnika 2: `data/real_engines/README.md`.
-
-## Endpointy API
+### Endpointy API
 
 | Endpoint | Metoda | Opis |
 |---|---|---|
 | `/` | GET | dashboard (HTML) |
 | `/api/health` | GET | healthcheck samego API |
-| `/api/scenarios` | GET | lista scenariuszy demo (nazwa, opis, sugerowany próg) |
-| `/api/demo` | GET | zestaw czujników demo (`?scenario=<nazwa>`, domyślnie `bearing_wear`) |
-| `/api/analyze` | POST | pełna analiza: `{t, sensors, threshold, window}` → JSON z E(t), twist/trend/anomalie/rytm, TTF, health_score |
-| `/api/monitor/status` | GET | ostatni stan zapisany przez `monitor.py` (do panelu live) |
-| `/api/monitor/calibration` | GET | raport z momentu kalibracji (Mann-Kendall + ile próbek do stabilizacji) |
+| `/api/scenarios` | GET | lista 5 scenariuszy demo (nazwa, opis, sugerowany próg) |
+| `/api/demo` | GET | syntetyczny zestaw czujników (`?scenario=<nazwa>`, domyślnie `bearing_wear`) |
+| `/api/analyze` | POST | pełna analiza: `{t, sensors, threshold, window}` → JSON z E(t), twist/trend/anomalie/rytm, TTF, health_score, trigger |
 
-`/api/analyze` przyjmuje czujniki o **różnej długości** i zwraca
-czytelny błąd (HTTP 400 + opis) zamiast 500 przy brakujących/pustych
-danych.
+`/api/analyze` przyjmuje czujniki o **różnej długości** (korzysta z
+`_align()` w Fusion) i zwraca czytelny błąd (HTTP 400 + opis) zamiast
+500 przy brakujących/pustych danych - zweryfikowane bezpośrednio przez
+prawdziwe zapytania HTTP (curl), nie tylko czytanie kodu:
+
+```
+POST /api/analyze {}                          -> 400 "wymagane pola: 't' i 'sensors'"
+POST /api/analyze {"t":[],"sensors":{"x":[]}}  -> 400 "t i sensors nie moga byc puste"
+POST /api/analyze <dane demo>                  -> 200, health_score=0.385, ttf=5.2s, fusion_score=40.93
+```
+
+**Uczciwe zastrzeżenie**: w tym środowisku (piaskownica bez
+przeglądarki/wyświetlacza) nadal nie da się dosłownie zobaczyć
+wyrenderowanych pikseli - ale zamiast tylko czytania kodu,
+zweryfikowałem: (1) całe API prawdziwymi zapytaniami HTTP z serwerem
+faktycznie uruchomionym, (2) składnię JS (`node --check`), (3)
+FAKTYCZNE WYKONANIE logiki rysującej wykresy (`drawChart`, `parseCsv`)
+w Node z podstawionym fałszywym `canvas`/DOM, na 7 przypadkach
+brzegowych (patrz sekcja o poprawce CDN wyżej) - żaden nie rzucił
+wyjątku, (4) zgodność wszystkich `getElementById()` z `id=` w HTML,
+(5) brak jakichkolwiek zewnętrznych adresów URL na stronie. To
+najsurowsza weryfikacja frontendu, jaką dało się zrobić bez realnej
+przeglądarki. Jeśli mimo to coś w przeglądarce wygląda nie tak, daj
+znać ze szczegółami/zrzutem ekranu - poprawię.
+
+## Status
+
+32/32 testów (`pytest -q`, w tym 7 dla `timdr_industrial_trigger.py`).
+Znalezione i naprawione: 3 błędy w
+`timdr_industrial_fusion.py` (w tym jeden mylący trend z rytmem - a
+trend to główny sygnał, który to narzędzie ma wykrywać) i 3 błędy w
+`timdr_industrial_predict.py`, w tym jeden krytyczny (TTF zależne od
+bezwzględnego znacznika czasu zamiast od faktycznej dynamiki).
+
+## 🐛 Błędy w `timdr_industrial_fusion.py`
+
+### 1. `rhythm()` myli trend z periodycznością
+
+Oryginalny kod tylko odejmował średnią i zgłaszał **każdy** lag powyżej
+progu, nie tylko lokalne maksima autokorelacji. Zweryfikowano: czysty
+rosnący trend (zero periodyczności, z realistycznym szumem czujnika)
+dawał `rhythm_score≈0.99` i **48 "wykrytych okresów"** - dokładnie to,
+czego ten moduł ma NIE robić, bo trend to główny sygnał degradacji, nie
+szum do zignorowania. Naprawiono: pełny detrend (nachylenie + wyraz
+wolny) przed autokorelacją + zgłaszanie tylko lokalnych maksimów.
+Zweryfikowano też, że prawdziwa okresowość (okres 15) nałożona na silny
+trend nadal poprawnie wychodzi po poprawce.
+
+### 2. Krótkie sygnały (n<2) crashowały `twist()`/`rhythm()`
+
+`np.gradient` wywoływany bez ochrony na sygnałach 0-1-elementowych
+dawał `IndexError`. Naprawiono zgodnie ze standardem reszty modułów
+TIMDR w tym zestawie repozytoriów.
+
+### 3. `fusion_score()` na pustych tablicach
+
+`np.max([])` rzuca `ValueError` - może się zdarzyć dla bardzo krótkich
+sygnałów po poprawce #2. Naprawiono (`safe_max`).
+
+## 🐛 Błędy w `timdr_industrial_predict.py`
+
+### 1. TTF zwracane jako współrzędna czasu, nie czas pozostały (najpoważniejszy błąd)
+
+Oryginalny kod zwracał `(threshold - b) / a` wprost - czyli punkt na
+osi `t`, w którym model przewiduje przekroczenie progu, **nie**
+odejmując bieżącego czasu. Zweryfikowano wprost: przesunięcie całego
+`t` o +1000s (fizycznie identyczna sytuacja maszyny) zmieniało zwrócone
+"TTF" też dokładnie o +1000s. Z realnymi znacznikami epoch (~1.75
+miliarda) dawało to **"czas do awarii: ~330 lat"** zamiast realnej
+wartości. Naprawiono: TTF liczone jest jako różnica względem ostatniej
+próbki (`t[-1]`), w tej samej, wycentrowanej skali co dopasowanie
+regresji (patrz błąd #3 niżej).
+
+### 2. TTF zależne 16-krotnie od długości historii danych, nie od stanu maszyny
+
+Regresja (liniowa i wykładnicza) liczona była na CAŁEJ historii E(t) od
+`t=0`. Zweryfikowano: dla FIZYCZNIE IDENTYCZNEJ ostatniej fazy
+degradacji (te same 100 próbek), ale różnej długości wcześniejszej
+zdrowej historii, przewidywany TTF wychodził:
+
+| długość zdrowej historii | TTF |
+|---|---|
+| 50s | 135s |
+| 150s | 273s |
+| 400s | 818s |
+| 800s | 2254s |
+
+16-krotna różnica dla tej samej aktualnej sytuacji maszyny. Naprawiono:
+regresja liczona tylko na ostatnich `window` próbkach (domyślnie 60).
+Po poprawce te same 4 warianty dają wynik w zakresie 42.6-43.0s -
+zbieżność, nie rozjazd rzędów wielkości.
+
+### 3. Niestabilność numeryczna regresji przy realnych znacznikach czasu
+
+Nawet po poprawce #2, `lstsq` na surowych wartościach `t` (kolumna `[t,
+1]`) jest źle uwarunkowane dla dużych, przesuniętych wartości czasu
+(epoch, rząd 1e9) - kolumny różnią się o ~9 rzędów wielkości. Naprawiono:
+`t` jest centrowane (`t - t[0]` okna) przed dopasowaniem.
+
+### 4. `health_score()` permanentnie zatruty starym zdarzeniem
+
+Oryginalny kod liczył z-score E względem WŁASNEJ CAŁEJ historii i brał
+`max()` po wszystkim - jeden stary, jednorazowy skok (np. chwilowe
+zakłócenie czujnika) blokował wynik na zawsze. Zweryfikowano: 500 próbek,
+jednorazowy skok w próbce 50, reszta (450 próbek = 90% danych) w normie
+→ `health_score=0.000` (permanentnie "krytyczny"), mimo że maszyna od
+dawna pracuje normalnie. Dodatkowy problem: skala health_score (z-score
+własnej historii /5) nie miała żadnego związku z `threshold` używanym w
+`predict_failure()` - "krytyczny" w obu miejscach mogło oznaczać zupełnie
+różne wartości E. Naprawiono: health_score liczy medianę z ostatnich
+`window` próbek (domyślnie 20) względem TEGO SAMEGO `threshold`, co
+`predict_failure()`.
+
+## ✅ Co było już poprawnie zaprojektowane (bez zmian)
+
+- `fuse()`: normalizacja każdej cechy (median/MAD) przed połączeniem w
+  normę - unika błędu "dominacji skali" znalezionego wcześniej w innych
+  modułach tej rodziny (`timdr_security.py`, `timdr_rhythm.py`).
+- `twist()`: `np.gradient(E, t)` z realnym `t`, nie po indeksie.
+- `_mad_z()`: median/MAD zamiast mean/std - odporne na to, że pojedyncza
+  anomalia zawyży własny próg detekcji (sprawdzone empirycznie).
+- Podstawowy szkielet autokorelacji w `rhythm()` (korekta malejącego
+  okna nakładania przez dzielenie przez `n-lag`) - ta sama poprawna
+  technika, którą wprowadziliśmy wcześniej w `TIMDR-Security-Module/timdr_rhythm.py`.
 
 ## 📦 Nowe repo?
 
-Tak — to osobna domena (predictive maintenance dla maszyn przemysłowych:
+Tak - to osobna domena (predictive maintenance dla maszyn przemysłowych:
 łożyska, pompy, silniki, wibracje/temperatura/ciśnienie/prąd), odrębna
 od istniejących repozytoriów (Radar, Flight-Tracking, Security,
-Echosonda, Earthquake). Oba moduły (`Fusion` + `Predict`) trzymane razem
-w jednym repo, bo `Predict` bezpośrednio zależy od wyjścia `Fusion`
-(energii stanu E(t)) i zawsze są używane razem, jak pokazuje przykład
-użycia poniżej.
+Echosonda, Earthquake). Oba moduły (`Fusion` + `Predict`) trzymane
+razem w jednym repo, bo `Predict` bezpośrednio zależy od wyjścia
+`Fusion` (energii stanu E(t)) i zawsze są używane razem, jak pokazuje
+przykład użycia poniżej.
 
 ## Przykład użycia
 
@@ -193,35 +296,35 @@ score = fusion.fusion_score(tw_z, tr_z, an_z, r_score)
 
 ttf, ttf_lin, ttf_exp = predict.predict_failure(t, E, threshold=60.0)
 health = predict.health_score(E, threshold=60.0)
+
+from timdr_industrial_trigger import IndustrialTrigger
+trigger_result = IndustrialTrigger().analyze(t, E, threshold=60.0)
 ```
 
 ![Fuzja czujników + predykcja TTF](screenshot_industrial_predict.png)
 
 ## 🎯 Zastosowania i warunki
 
-- **Zużycie łożysk / zatarcie pompy / nierówne obroty**: `trend` na
-  powolną degradację, `twist` na pierwsze "uderzenia", `anomalies` na
-  skoki, `rhythm` na prawdziwe cykliczne wzorce, nie na sam trend.
+- **Zużycie łożysk / zatarcie pompy / nierówne obroty**: działa jak
+  opisano w oryginalnym zgłoszeniu - `trend` na powolną degradację,
+  `twist` na pierwsze "uderzenia", `anomalies` na skoki, `rhythm` (po
+  poprawce) na prawdziwe cykliczne wzorce, nie na sam trend.
 - **`threshold` musi być spójny między `predict_failure()` i
-  `health_score()`** — oba teraz go współdzielą, ale to WY wybieracie
+  `health_score()`** - oba teraz go współdzielą, ale to WY wybieracie
   wartość odpowiednią dla Waszej maszyny (E to znormalizowana,
   bezwymiarowa "odległość od normy", nie fizyczna jednostka).
 - **`window` w `predict_failure()`/`degradation_model()` (domyślnie 60)
   musi pasować do dynamiki Waszej maszyny i częstotliwości próbkowania**
-  — za krótkie okno = wrażliwość na szum, za długie = rozwodniony TTF
-  przez starą historię.
+  - za krótkie okno = wrażliwość na szum, za długie = powrót do
+    oryginalnego błędu (TTF rozwodnione przez starą historię).
 - **Model wykładniczy jest bardziej pesymistyczny niż liniowy** przy
-  typowych profilach degradacji — `predict_failure()` domyślnie bierze
-  bardziej pesymistyczny z obu (`min()`), nie "bardziej stabilny" —
-  ostrzega wcześniej kosztem większej liczby fałszywych alarmów. Jeśli
-  wolisz mniej czułe ostrzeżenia, użyj `ttf_linear` bezpośrednio
-  zamiast `ttf`.
-- **Przy uruchomieniu na nowym urządzeniu** użyj `--auto-calibrate`
-  zamiast ręcznie wskazywać zdrowy okres — i sprawdź panel diagnostyki
-  kalibracji w dashboardzie (albo `timdr_calibration_report.json`), żeby
-  wiedzieć, czy wybrane okno faktycznie przeszło walidację statystyczną.
-- Metoda nie jest przyczynowa (`np.gradient` w punktach wewnętrznych) —
+  typowych profilach degradacji (zweryfikowane na przykładach w tym
+  README) - `predict_failure()` domyślnie bierze bardziej pesymistyczny
+  z obu (`min()`), nie "bardziej stabilny" (żadna z metod nie mierzy
+  stabilności) - ostrzega wcześniej kosztem większej liczby fałszywych
+  alarmów. Jeśli wolisz mniej czułe ostrzeżenia, użyj `ttf_linear`
+  bezpośrednio zamiast `ttf`.
+- Metoda nie jest przyczynowa (`np.gradient` w punktach wewnętrznych) -
   do strumienia na żywo nadaje się z jednopróbkowym opóźnieniem.
 
-Uruchomienie: `python demo.py` / testy: `pytest -q` (61/61, szczegóły
-błędów znalezionych po drodze: [`HISTORIA_BLEDOW.md`](HISTORIA_BLEDOW.md)).
+Uruchomienie: `python demo.py` / testy: `pytest -q`.

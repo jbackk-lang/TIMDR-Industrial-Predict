@@ -6,18 +6,11 @@ Serwer Flask udostepniajacy:
   GET  /api/scenarios     -> lista dostepnych scenariuszy demo (nazwa, opis, sugerowany prog)
   GET  /api/demo          -> syntetyczny zestaw czujnikow (?scenario=<nazwa>, domyslnie bearing_wear)
   POST /api/analyze       -> pelna analiza TIMDR (fuse + twist/trend/anomalies/rhythm + TTF + health)
-  GET  /api/monitor/status -> ostatni stan zapisany przez monitor.py (timdr_status.json), do panelu live
-  GET  /api/monitor/calibration -> raport z MOMENTU kalibracji (Mann-Kendall + ile probek do
-                                    stabilizacji) - pisany RAZ przez monitor.py, nie w petli live
   GET  /api/health        -> healthcheck samego API (nie mylic z health_score maszyny)
 
 Uruchomienie: `python api.py` (albo `run.bat` na Windows), potem
 http://127.0.0.1:5000 w przegladarce.
 """
-
-import json
-import os
-from datetime import datetime, timezone
 
 import numpy as np
 from flask import Flask, jsonify, request, send_from_directory
@@ -25,20 +18,18 @@ from flask import Flask, jsonify, request, send_from_directory
 from demo_scenarios import DEFAULT_THRESHOLDS, SCENARIOS, make_demo_data
 from timdr_industrial_fusion import TIMDRIndustrialFusion
 from timdr_industrial_predict import TIMDRIndustrialPredict
+from timdr_industrial_trigger import IndustrialTrigger
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
-# Plik zapisywany przez monitor.py (--state-file) - domyslnie w tym samym
-# katalogu co api.py. Jesli monitor.py dziala z innego katalogu roboczego
-# z innym --state-file, ustaw zmienna srodowiskowa TIMDR_STATUS_FILE.
-STATUS_FILE = os.environ.get("TIMDR_STATUS_FILE", "timdr_status.json")
-
-# Plik raportu kalibracji zapisywany przez monitor.py (--calib-report) -
-# RAZ, przy faktycznej (nowej) kalibracji, nie przy kazdym sprawdzeniu.
-CALIB_REPORT_FILE = os.environ.get("TIMDR_CALIB_REPORT_FILE", "timdr_calibration_report.json")
-
 fusion = TIMDRIndustrialFusion()
 predict = TIMDRIndustrialPredict()
+# Ta sama instancja fusion/predict co wyzej - IndustrialTrigger nie duplikuje
+# stanu, tylko odpytuje juz istniejacy fusion/predict jeszcze raz z tym samym
+# threshold/window co reszta api_analyze() (deterministyczne funkcje, wiec
+# wynik jest identyczny z tw_idx/an_idx/ttf ponizej - trigger tylko je
+# priorytetyzuje i mapuje na jedno zdarzenie).
+trigger = IndustrialTrigger(fusion=fusion, predictor=predict)
 
 
 @app.route("/")
@@ -115,6 +106,11 @@ def api_analyze():
 
         ttf, ttf_lin, ttf_exp = predict.predict_failure(t, E, threshold=threshold, window=window)
         health = predict.health_score(E, threshold=threshold, window=window)
+
+        try:
+            trigger_result = trigger.analyze(t, E, threshold=threshold, window=window).as_dict()
+        except Exception:  # noqa: BLE001 - trigger jest dodatkiem, nie moze wywalic calej analizy
+            trigger_result = None
     except Exception as exc:  # noqa: BLE001 - chcemy zwrocic czytelny blad do dashboardu, nie 500 bez opisu
         return jsonify({"error": f"blad analizy: {exc}"}), 400
 
@@ -139,93 +135,8 @@ def api_analyze():
         "health_score": float(health),
         "threshold": threshold,
         "window": window,
+        "trigger": trigger_result,
     })
-
-
-def _seconds_since(iso_timestamp):
-    try:
-        ts = datetime.fromisoformat(iso_timestamp)
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - ts).total_seconds()
-    except (TypeError, ValueError):
-        return None
-
-
-@app.route("/api/monitor/status")
-def api_monitor_status():
-    """
-    Zwraca ostatni stan zapisany przez `monitor.py` (ciagly albo
-    okresowy - patrz README) do `STATUS_FILE`. Jesli monitor.py nigdy
-    nie byl uruchomiony (plik nie istnieje), zwraca `running: false`
-    zamiast bledu - dashboard traktuje to jako "brak aktywnego
-    monitoringu", nie awarie API.
-
-    Dodatkowo liczy DWA NIEZALEZNE sygnaly "na zywo" (przydatne np. dla
-    OBD-II/czujnika, ktory moze sie rozlaczyc bez zabijania samego
-    procesu monitor.py):
-      - `checker_online`: czy PETLA monitor.py w ogole jeszcze dziala
-        (swiezosc pola `timestamp` - kazde sprawdzenie je aktualizuje,
-        NIEZALEZNIE od tego, czy przyszly nowe dane).
-      - `data_live`: czy zrodlo danych (CSV od obd_source.py/czujnika)
-        FAKTYCZNIE jeszcze rosnie (swiezosc `last_data_change`, ktore
-        monitor.py aktualizuje TYLKO gdy n_samples realnie wzrosnie).
-    Rozroznienie to jest celowe: monitor.py moze grzecznie odpytywac ten
-    sam, juz nierosnacy CSV co --interval sekund (wiec `checker_online`
-    bylby caly czas True), mimo ze adapter OBD-II dawno sie rozlaczyl -
-    tylko `data_live` to wykryje. Oba pola sa `None`, gdy `interval` nie
-    jest znany (monitor.py uruchomiony w trybie `--once`/cron, gdzie nie
-    ma jednego stalego oczekiwanego rytmu do porownania).
-    """
-    if not os.path.exists(STATUS_FILE):
-        return jsonify({"running": False})
-    try:
-        with open(STATUS_FILE) as f:
-            status = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        # POPRAWKA: monitor.py moze akurat zapisywac plik w momencie
-        # odczytu (nie jest to atomowy zapis) - traktujemy to jako
-        # przejsciowy brak danych, nie blad 500, zeby panel live nie
-        # migotal czerwonym bledem przy kazdym odswiezeniu w zlym momencie.
-        return jsonify({"running": True, "error": f"chwilowy blad odczytu: {exc}"}), 200
-    status["running"] = True
-
-    interval = status.get("interval")
-    if interval:
-        threshold = max(3 * float(interval), 15.0)
-        age_checker = _seconds_since(status.get("timestamp"))
-        age_data = _seconds_since(status.get("last_data_change"))
-        status["checker_online"] = (age_checker is not None and age_checker < threshold)
-        status["data_live"] = (age_data is not None and age_data < threshold)
-        status["seconds_since_data_change"] = age_data
-    else:
-        status["checker_online"] = None
-        status["data_live"] = None
-        status["seconds_since_data_change"] = None
-
-    return jsonify(status)
-
-
-@app.route("/api/monitor/calibration")
-def api_monitor_calibration():
-    """
-    Zwraca raport zapisany RAZ przez monitor.py w momencie faktycznej
-    kalibracji (--healthy-ref lub --auto-calibrate) - metoda, ile probek
-    uzyto, wynik walidacji Mann-Kendalla (czy okno kalibracyjne ma
-    statystycznie istotny trend) i ile probek teoretycznie trzeba do
-    stabilizacji (calibration_convergence). NIE odswieza sie przy kazdym
-    sprawdzeniu jak /api/monitor/status - to diagnostyka jednorazowa,
-    dashboard pobiera ja raz przy zaladowaniu strony, nie w petli.
-    """
-    if not os.path.exists(CALIB_REPORT_FILE):
-        return jsonify({"available": False})
-    try:
-        with open(CALIB_REPORT_FILE) as f:
-            report = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        return jsonify({"available": True, "error": f"chwilowy blad odczytu: {exc}"}), 200
-    report["available"] = True
-    return jsonify(report)
 
 
 if __name__ == "__main__":
