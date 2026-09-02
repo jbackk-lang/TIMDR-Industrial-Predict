@@ -124,31 +124,6 @@
 </div>
 <div id="scenarioDesc" class="scenario-desc"></div>
 
-<div class="panel" id="monitorPanel" style="margin-bottom:14px; display:none;">
-  <h2>📡 Monitoring na żywo (monitor.py)</h2>
-  <div style="font-family:var(--mono); font-size:13px; display:flex; gap:24px; flex-wrap:wrap; align-items:center;">
-    <div>ostatnia aktualizacja: <span id="monLastUpdate">—</span></div>
-    <div>próbek: <span id="monN">—</span></div>
-    <div>health: <span id="monHealth">—</span></div>
-    <div>TTF: <span id="monTTF">—</span></div>
-    <div id="monAlert" class="status-pill status-crit" style="display:none;">ALARM</div>
-  </div>
-</div>
-
-<div class="panel" id="calibrationPanel" style="margin-bottom:14px; display:none;">
-  <h2>🧪 Diagnostyka kalibracji (jednorazowa, nie odświeża się co kilka sekund)</h2>
-  <div style="font-family:var(--mono); font-size:13px; display:flex; gap:24px; flex-wrap:wrap; align-items:center;">
-    <div>metoda: <span id="calMethod">—</span></div>
-    <div>próbek użytych: <span id="calNUsed">—</span></div>
-    <div>ile próbek do stabilizacji (Mann-Kendall/median): <span id="calNRequired">—</span></div>
-    <div>walidacja okna (Mann-Kendall): <span id="calValidated">—</span></div>
-  </div>
-  <div id="calWarning" style="font-family:var(--mono); font-size:12px; color:var(--crit,#c0392b); margin-top:6px; display:none;">
-    UWAGA: co najmniej jeden czujnik w oknie kalibracyjnym wykazuje statystycznie istotny trend (p&lt;0.05) —
-    okno może nie być tak stabilne, jak sugerował sam wskaźnik zmienności.
-  </div>
-</div>
-
 <div class="cards">
   <div class="card">
     <div class="label">Health score</div>
@@ -170,6 +145,10 @@
   <div class="card">
     <div class="label">Wykryty rytm</div>
     <div class="value" style="font-size:18px;"><span id="valRhythm">—</span></div>
+  </div>
+  <div class="card">
+    <div class="label">Trigger (priorytetyzowane zdarzenie)</div>
+    <div class="value" style="font-size:16px;"><span id="valTrigger">—</span></div>
   </div>
 </div>
 
@@ -484,6 +463,20 @@ function renderResult(data){
     ? `okres ${data.rhythm_periods[0]} (moc ${fmt(data.rhythm_score, 2)})`
     : 'brak';
 
+  // Trigger: jedno priorytetyzowane zdarzenie z timdr_industrial_trigger.py
+  // (FAILURE_IMMINENT > STRUCTURE > ANOMALY > NONE), niezalezne od
+  // wykresow twist_idx/anomaly_idx powyzej - to samo, ale zwiezle.
+  const trig = data.trigger;
+  const trigEl = document.getElementById('valTrigger');
+  if (!trig){
+    trigEl.textContent = '—';
+  } else if (!trig.triggered){
+    trigEl.textContent = 'brak zdarzenia';
+  } else {
+    trigEl.textContent = `${trig.type} @ idx ${trig.location}`;
+    trigEl.title = trig.message;
+  }
+
   const anomalyPoints = data.anomaly_idx.map(i => ({ i, y: data.E[i] }));
   const twistPoints = data.twist_idx.map(i => ({ i, y: data.E[i] }));
 
@@ -542,61 +535,6 @@ document.getElementById('csvFile').addEventListener('change', (ev) => {
 window.addEventListener('resize', () => {
   if (lastData) renderSensors(lastData);
 });
-
-// ------------------------------------------------------------
-// Panel "monitoring na zywo" - odpytuje /api/monitor/status co 5s.
-// Niezalezny od reki analizy powyzej: jesli monitor.py (osobny proces,
-// ciagly albo wywolywany okresowo z crona) nigdy nie zapisal statusu,
-// panel po prostu zostaje ukryty - to nie jest blad dashboardu.
-// ------------------------------------------------------------
-async function pollMonitor(){
-  try{
-    const res = await fetch('/api/monitor/status');
-    const data = await res.json();
-    const panel = document.getElementById('monitorPanel');
-    if (!data.running){ panel.style.display = 'none'; return; }
-    panel.style.display = '';
-    document.getElementById('monLastUpdate').textContent = data.timestamp || '—';
-    document.getElementById('monN').textContent = data.n_samples ?? '—';
-    document.getElementById('monHealth').textContent = fmt(data.health_score, 3);
-    document.getElementById('monTTF').textContent =
-      (data.ttf === null || data.ttf === undefined) ? '∞' : fmt(data.ttf, 1) + (data.ttf_confirmed ? '' : ' (niepotwierdzone)');
-    document.getElementById('monAlert').style.display = data.alert ? '' : 'none';
-  }catch(e){
-    console.warn('[TIMDR dashboard] monitor poll nieudany', e);
-  }
-}
-pollMonitor();
-setInterval(pollMonitor, 5000);
-
-// ------------------------------------------------------------
-// Diagnostyka kalibracji (Mann-Kendall + ile probek do stabilizacji) -
-// pobierana RAZ przy zaladowaniu strony, NIE w petli setInterval jak
-// pollMonitor() powyzej. To diagnostyka z MOMENTU kalibracji (pisana raz
-// przez monitor.py), nie zmienia sie miedzy kolejnymi sprawdzeniami, wiec
-// odswiezanie jej co 5s tylko zaszumialoby panel bez zadnej nowej
-// informacji - user wybral jawnie ta opcje zamiast wpiecia w panel live.
-// ------------------------------------------------------------
-async function fetchCalibrationReport(){
-  try{
-    const res = await fetch('/api/monitor/calibration');
-    const data = await res.json();
-    const panel = document.getElementById('calibrationPanel');
-    if (!data.available){ panel.style.display = 'none'; return; }
-    panel.style.display = '';
-    document.getElementById('calMethod').textContent = data.method || '—';
-    document.getElementById('calNUsed').textContent = data.n_samples_used ?? '—';
-    document.getElementById('calNRequired').textContent =
-      (data.convergence_n_required === null || data.convergence_n_required === undefined)
-        ? 'nigdy (sygnał się nie ustabilizował w badanym okresie)'
-        : data.convergence_n_required;
-    document.getElementById('calValidated').textContent = data.validated ? 'OK - brak istotnego trendu' : 'NIE - wykryto trend';
-    document.getElementById('calWarning').style.display = data.validated ? 'none' : '';
-  }catch(e){
-    console.warn('[TIMDR dashboard] raport kalibracji niedostepny', e);
-  }
-}
-fetchCalibrationReport();
 
 loadScenarios().then(loadDemo).then(runAnalyze).catch(e => showError(e.message));
 </script>
