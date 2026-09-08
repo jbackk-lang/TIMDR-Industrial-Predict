@@ -152,6 +152,24 @@ UCZCIWE ZASTRZEZENIA:
      dostep sieciowy z poziomu bash do raw.githubusercontent.com (przez co
      pelne pliki .npz nie mogly zostac automatycznie sciagniete do repo -
      pobrano je przez przegladarke, konwertujac .npz->tablice w JS).
+  6. (2026-09-08, uwaga uzytkownika, NIE zaimplementowane teraz - tylko
+     odnotowane, patrz README sekcja "Doprecyzowanie stan vs przejscie")
+     Progi referencyjne (RESONANCE_BAND_HZ + progi tau/rho/J z #1-#3) sa
+     obecnie GLOBALNE dla calego modulu, dobrane dla JEDNEJ konfiguracji
+     (1797 RPM, kanal DE). Inna predkosc obrotowa, inny typ lozyska albo
+     inny kanal (FE/BA) prawdopodobnie wymaga WLASNYCH progow - docelowy
+     ksztalt to `reference_profile[rpm][channel]` zamiast stalych
+     modulowych, gdy pojawia sie dane z wiecej niz jednej konfiguracji.
+     Podobnie `k_neighbors=8` (domyslne TIMDR_EarthquakeCore, dziedziczone
+     przez sibling-import) jest dobrane pod sejsmike; tu nie ma na to
+     wplywu, bo Lambda liczone jest z usrednionego widma calego okna, nie
+     z per-probkowego flow()/trm() (patrz PRE-REJESTRACJA wyzej) - ale
+     gdyby w przyszlosci wrocic do lokalnych anomalii per-probka (PROBA
+     1-2), k=8 przy natywnych 12 kHz obejmuje ~0.58ms (krocej niz okres
+     uderzenia ~7-9ms, wiec formalnie OK), lecz przy innej czestotliwosci
+     probkowania to samo k=8 moglby znow objac wielokrotnosc okresu
+     uderzenia (ten sam blad co decymacja 500Hz w PROBIE 1) - k=2-4
+     bylby bezpieczniejszym punktem wyjscia do takiego rozszerzenia.
 ===========================================================================
 """
 from __future__ import annotations

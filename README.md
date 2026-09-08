@@ -412,6 +412,43 @@ koncepcyjnym** (jak niedomknięte G4/G7 w `Axioms_G_TIMDR_Geometry.md`) —
 żaden nowy aksjomat nie został tu dopisany, to tylko użycie istniejącego
 trójkąta Λ-τ-ρ-J, nie jego formalne rozszerzenie.
 
+**Doprecyzowanie „stan vs przejście”** (kluczowa różnica między tym
+adapterem a adapterem sejsmicznym, warta nazwania wprost, nie tylko
+wywnioskowania z kodu): **w domenie przemysłowej TIMDR nie wykrywa
+przejścia reżimu w czasie, lecz klasyfikuje stan względem referencyjnego
+zdrowego profilu.** W sejsmice mainshock jest przejściem W ŚRODKU jednego
+ciągłego zapisu (spokój → zdarzenie → powrót), więc kalibracja progu z
+wcześniejszej części TEGO SAMEGO śladu ma sens. Uszkodzenie łożyska jest
+stanem stałym od pierwszej do ostatniej próbki nagrania testowego — nie
+ma tam „spokojnego okresu przed zdarzeniem” do wykorzystania, dlatego
+architektura jest inna: dwa OSOBNE nagrania (referencyjne zdrowe + testowe),
+nie jedno kalibrowane wewnętrznie.
+
+Dwie dalsze konsekwencje tego rozróżnienia, na razie świadomie nie
+rozwiązane (nie blokują obecnego, zwalidowanego rozwiązania — patrz
+wynik niżej):
+
+- **Progi referencyjne są per-konfiguracja, nie globalne.** Obecne progi
+  τ/ρ/J i pasmo rezonansu `RESONANCE_BAND_HZ=(2500, 4000)` są
+  wyliczone/dobrane dla 1797 RPM, kanału DE (Drive End), tego jednego typu
+  łożyska. Inna prędkość obrotowa, inny kanał (FE/BA) albo inny typ
+  łożyska prawdopodobnie przesunie zarówno progi, jak i pasmo rezonansu —
+  potrzebne byłoby coś w rodzaju `reference_profile[rpm][channel]` zamiast
+  jednego zestawu stałych globalnych. Nie zaimplementowane teraz — tylko
+  odnotowane jako miejsce do rozbudowy, gdy pojawią się dane z innej
+  konfiguracji.
+- **`k_neighbors=8` (domyślne `TIMDR_EarthquakeCore`) jest dobrane pod
+  sejsmikę, nie pod sygnał maszynowy.** Działa tu bez zmian, bo obecne
+  rozwiązanie używa Λ wyłącznie z pasma rezonansu (uśrednione widmo mocy
+  całego okna), nie z `flow()`/`trm()` per-próbka. Gdyby w przyszłości
+  wrócić do lokalnych anomalii/impulsów IR/OR/B na poziomie próbek (patrz
+  próby 1-2 wyżej), `k_neighbors=8` przy natywnych 12 kHz obejmuje ~0.58ms
+  — krócej niż okres uderzenia (~7-9ms), więc technicznie poprawne, ale
+  warto pamiętać, że przy innej częstotliwości próbkowania to samo `k=8`
+  może znów objąć wielokrotność okresu uderzenia (patrz analogiczny
+  problem z decymacją 500Hz w próbie 1) — wartość 2-4 byłaby bezpieczniejszym
+  punktem wyjścia do takiego rozszerzenia, nie 8.
+
 **Wynik na realnych danych (fixture 0.128s, 4 okna po 384 próbki)**:
 zdrowe łożysko porównane samo ze sobą daje ρ=0; wszystkie trzy typy
 uszkodzeń dają WYŻSZE ρ i Λ niż zdrowa referencja (IR21: ρ=0.668,
