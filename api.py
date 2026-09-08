@@ -7,10 +7,15 @@ Serwer Flask udostepniajacy:
   GET  /api/demo          -> syntetyczny zestaw czujnikow (?scenario=<nazwa>, domyslnie bearing_wear)
   POST /api/analyze       -> pelna analiza TIMDR (fuse + twist/trend/anomalies/rhythm + TTF + health)
   GET  /api/health        -> healthcheck samego API (nie mylic z health_score maszyny)
+  GET  /api/bearing/scenarios -> lista realnych nagran CWRU (referencja + 3 typy usterek)
+  GET  /api/bearing/demo      -> meta-dynamika (Lambda/tau/rho/J, bearing_meta_adapter.py) na
+                                  realnych danych CWRU (?fault=normal|ir21|or6_21|b21)
 
 Uruchomienie: `python api.py` (albo `run.bat` na Windows), potem
 http://127.0.0.1:5000 w przegladarce.
 """
+
+import os
 
 import numpy as np
 from flask import Flask, jsonify, request, send_from_directory
@@ -19,8 +24,59 @@ from demo_scenarios import DEFAULT_THRESHOLDS, SCENARIOS, make_demo_data
 from timdr_industrial_fusion import TIMDRIndustrialFusion
 from timdr_industrial_predict import TIMDRIndustrialPredict
 from timdr_industrial_trigger import IndustrialTrigger
+from bearing_meta_adapter import (
+    MetaOperatorM,
+    build_meta_series_from_reference_and_test,
+)
 
 app = Flask(__name__, static_folder="static", static_url_path="")
+
+# ---------------------------------------------------------------------------
+# Wibracja lozyska (CWRU, dane realne) - patrz bearing_meta_adapter.py i
+# test_bearing_meta_adapter.py. UWAGA: fixture'y w data/cwru_bearing/ to
+# TYLKO pierwsze 1536 probek (0.128s) kazdego nagrania (zastrzezenie #5 w
+# naglowku bearing_meta_adapter.py - pelne nagrania nie mieszcza sie w repo,
+# patrz README po URL do samodzielnego pobrania). Dlatego demo uzywa
+# window_samples=384 (4 pelne okna na fixture), NIE domyslnego
+# WINDOW_SAMPLES_DEFAULT=4096 z modulu (ktory zaklada pelne, kilkunasto-
+# sekundowe nagrania) - identyczna wartosc, co juz zweryfikowany
+# test_real_data_end_to_end_runs_without_crashing_and_returns_expected_shapes
+# w test_bearing_meta_adapter.py, NIE nowo dobrana tutaj.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_BEARING_DATA_DIR = os.path.join(_HERE, "data", "cwru_bearing")
+_BEARING_FS = 12000.0
+_BEARING_WINDOW_SAMPLES = 384
+_BEARING_FIXTURES = {
+    "normal": ("normal_1797_de_first1536.csv", "Zdrowe łożysko (referencja, porównana sama ze sobą)"),
+    "ir21": ("ir_0021_1797_de_first1536.csv", "Usterka bieżni wewnętrznej (IR, 0.021\")"),
+    "or6_21": ("or6_0021_1797_de_first1536.csv", "Usterka bieżni zewnętrznej (OR@6, 0.021\")"),
+    "b21": ("b_0021_1797_de_first1536.csv", "Usterka elementu tocznego (B, 0.021\")"),
+}
+_meta_operator_bearing = MetaOperatorM()
+
+
+def _load_bearing_fixture(filename: str):
+    path = os.path.join(_BEARING_DATA_DIR, filename)
+    s = np.loadtxt(path, delimiter=",")
+    t = np.arange(len(s), dtype=np.float64) / _BEARING_FS
+    return t, s
+
+
+def _bearing_result_to_dict(r) -> dict:
+    """Serializuje BearingMetaResult. Dolacza SUROWE stany (Lambda/tau/rho/J
+    per okno), nie tylko fazy - patrz zastrzezenie #4 w bearing_meta_adapter.py:
+    dla lozysk to STAN (nie jego pochodna M) niesie glowny sygnal, wiec
+    dashboard MUSI pokazac oba, zeby nie sugerowac, ze same fazy wystarcza."""
+    return {
+        "window_starts": [float(w) for w in r.window_starts],
+        "states": [
+            {"Lambda": s.Lambda, "tau": s.tau, "rho": s.rho, "J": s.J}
+            for s in r.states
+        ],
+        "phases": list(r.phases),
+        "magnitude": [_meta_operator_bearing.magnitude(m) for m in r.M_series],
+        "trigger": r.trigger.as_dict(),
+    }
 
 fusion = TIMDRIndustrialFusion()
 predict = TIMDRIndustrialPredict()
@@ -136,6 +192,52 @@ def api_analyze():
         "threshold": threshold,
         "window": window,
         "trigger": trigger_result,
+    })
+
+
+@app.route("/api/bearing/scenarios")
+def api_bearing_scenarios():
+    return jsonify([
+        {"id": key, "label": label}
+        for key, (_, label) in _BEARING_FIXTURES.items()
+    ])
+
+
+@app.route("/api/bearing/demo")
+def api_bearing_demo():
+    fault = request.args.get("fault", "ir21")
+    if fault not in _BEARING_FIXTURES:
+        return jsonify({"error": f"Nieznany fault '{fault}'. Dostępne: {sorted(_BEARING_FIXTURES)}"}), 400
+
+    ref_filename, _ = _BEARING_FIXTURES["normal"]
+    test_filename, _ = _BEARING_FIXTURES[fault]
+    try:
+        t_ref, s_ref = _load_bearing_fixture(ref_filename)
+        t_test, s_test = _load_bearing_fixture(test_filename)
+    except OSError as exc:
+        return jsonify({"error": f"Brak pliku fixture CWRU: {exc}"}), 500
+
+    try:
+        result = build_meta_series_from_reference_and_test(
+            t_ref, s_ref, t_test, s_test,
+            fs=_BEARING_FS, window_samples=_BEARING_WINDOW_SAMPLES,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    return jsonify({
+        "fault": fault,
+        "label": _BEARING_FIXTURES[fault][1],
+        "fs": _BEARING_FS,
+        "window_samples": _BEARING_WINDOW_SAMPLES,
+        "note": (
+            "Fragment 0.128s (1536 próbek, pierwsze z każdego nagrania CWRU) - "
+            "nie pełne nagranie (patrz README/zastrzeżenie #5 w bearing_meta_adapter.py). "
+            "Ufaj przede wszystkim kolumnie 'states' (Λ/τ/ρ/J), nie samym fazom "
+            "M-operatora - patrz zastrzeżenie #4: uszkodzenie łożyska to stan stały, "
+            "nie przejście, więc pochodna M rzadko wychodzi 'krytyczna'."
+        ),
+        "result": _bearing_result_to_dict(result),
     })
 
 

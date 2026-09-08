@@ -95,6 +95,19 @@
   .empty-msg{ color:var(--muted); font-size:12px; font-style:italic; padding:20px 0; text-align:center; }
   canvas{ max-width:100%; }
   footer{ margin-top:20px; color:var(--muted); font-size:11px; font-family:var(--mono); }
+
+  .meta-row{ display:grid; grid-template-columns:110px 1fr; align-items:center; gap:10px; margin-bottom:10px; }
+  .meta-row:last-child{ margin-bottom:0; }
+  .meta-row .meta-label{ font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  .phase-strip{ display:flex; height:22px; border-radius:4px; overflow:hidden; border:1px solid var(--panel-border); }
+  .phase-strip .seg{ flex:1; height:100%; }
+  .phase-stabilna{ background:var(--ok); }
+  .phase-przejsciowa{ background:var(--warn); }
+  .phase-krytyczna{ background:var(--crit); }
+  .meta-note{ font-size:11px; color:var(--muted); margin:6px 0 12px; font-style:italic; }
+  .states-table{ width:100%; border-collapse:collapse; font-size:11px; font-family:var(--mono); }
+  .states-table th, .states-table td{ padding:4px 8px; text-align:right; border-bottom:1px solid var(--panel-border); }
+  .states-table th:first-child, .states-table td:first-child{ text-align:left; }
 </style>
 </head>
 <body>
@@ -171,6 +184,23 @@
 <div class="panel" style="margin-bottom:14px;">
   <h2>Surowe czujniki</h2>
   <div class="sensor-grid" id="sensorGrid"><div class="empty-msg">Wczytaj dane demo albo CSV, żeby zobaczyć czujniki.</div></div>
+</div>
+
+<div class="panel" style="margin-bottom:14px;">
+  <h2>Wibracja łożyska — meta-dynamika Λ/τ/ρ/J (dane realne, CWRU)</h2>
+  <div class="controls" style="margin-bottom:10px;">
+    <label>nagranie testowe</label>
+    <select id="inBearingFault"></select>
+    <button id="btnBearingLoad">▶ Analizuj</button>
+  </div>
+  <div class="legend">
+    <span><i class="dot" style="background:var(--ok)"></i>stabilna</span>
+    <span><i class="dot" style="background:var(--warn)"></i>przejściowa</span>
+    <span><i class="dot" style="background:var(--crit)"></i>krytyczna</span>
+    <span style="margin-left:14px;">jeden segment = jedno okno (384 próbki @ 12kHz)</span>
+  </div>
+  <div id="bearingMetaBox"><div class="empty-msg">Wybierz nagranie i kliknij "Analizuj".</div></div>
+  <div class="meta-note" id="bearingNote"></div>
 </div>
 
 <footer>TIMDR-Industrial-Predict · lokalne API (Flask, 127.0.0.1:5000) · dane nie opuszczają tego komputera · wykresy rysowane własnym kodem (canvas), bez zależności od CDN</footer>
@@ -510,6 +540,61 @@ function setStatus(healthScore){
   else if (healthScore >= 0.3){ pill.textContent = 'ostrzeżenie'; pill.classList.add('status-warn'); }
   else { pill.textContent = 'krytyczny'; pill.classList.add('status-crit'); }
 }
+
+// ------------------------------------------------------------
+// Wibracja łożyska (CWRU, dane realne) - bearing_meta_adapter.py
+// Niezależne od reszty dashboardu (inny kształt danych: dwie ścieżki
+// referencja+test zamiast jednego ciągłego śladu, patrz docstring
+// bearing_meta_adapter.py) - własny stan, własne renderowanie.
+// ------------------------------------------------------------
+async function loadBearingScenarios(){
+  const res = await fetch('/api/bearing/scenarios');
+  if (!res.ok) throw new Error('nie udało się pobrać listy nagrań CWRU (HTTP ' + res.status + ')');
+  const scenarios = await res.json();
+  const sel = document.getElementById('inBearingFault');
+  sel.innerHTML = scenarios.filter(s => s.id !== 'normal').map(s => `<option value="${s.id}">${s.label}</option>`).join('');
+}
+
+function renderBearing(data){
+  const box = document.getElementById('bearingMetaBox');
+  const r = data.result;
+  const segs = r.phases.map(p => `<div class="seg phase-${p}" title="${p}"></div>`).join('');
+  const trig = r.trigger;
+  const trigLine = trig && trig.triggered
+    ? `<div class="meta-note" style="color:var(--warn);">⚑ ${trig.message}</div>`
+    : `<div class="meta-note">${trig ? trig.message : ''}</div>`;
+
+  const rows = r.states.map((s, i) => `<tr>
+      <td>okno ${i} (t=${fmt(r.window_starts[i], 3)}s)</td>
+      <td>${fmt(s.Lambda, 3)}</td><td>${fmt(s.tau, 3)}</td><td>${fmt(s.rho, 3)}</td><td>${fmt(s.J, 3)}</td>
+    </tr>`).join('');
+
+  box.innerHTML = `
+    <div class="meta-row">
+      <div class="meta-label">${data.label}</div>
+      <div class="phase-strip">${segs || '<span class="empty-note" style="padding-left:6px;">brak okien</span>'}</div>
+    </div>
+    ${trigLine}
+    <table class="states-table" style="margin-top:10px;">
+      <thead><tr><th>Okno</th><th>Λ</th><th>τ</th><th>ρ</th><th>J</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  document.getElementById('bearingNote').textContent = data.note || '';
+}
+
+async function loadBearingDemo(){
+  const fault = document.getElementById('inBearingFault').value;
+  if (!fault) return;
+  const res = await fetch('/api/bearing/demo?fault=' + encodeURIComponent(fault));
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  renderBearing(data);
+}
+
+document.getElementById('btnBearingLoad').addEventListener('click', () => {
+  loadBearingDemo().catch(e => showError(e.message));
+});
+loadBearingScenarios().then(loadBearingDemo).catch(e => showError(e.message));
 
 // ------------------------------------------------------------
 // Zdarzenia
