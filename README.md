@@ -169,7 +169,8 @@ znać ze szczegółami/zrzutem ekranu - poprawię.
 
 ## Status
 
-32/32 testów (`pytest -q`, w tym 7 dla `timdr_industrial_trigger.py`).
+81/81 testów (`pytest -q`, w tym 13 dla nowego `bearing_meta_adapter.py` -
+patrz sekcja "Integracja z TIMDR-META-DYNAMICS" niżej).
 Znalezione i naprawione: 3 błędy w
 `timdr_industrial_fusion.py` (w tym jeden mylący trend z rytmem - a
 trend to główny sygnał, który to narzędzie ma wykrywać) i 3 błędy w
@@ -328,3 +329,121 @@ trigger_result = IndustrialTrigger().analyze(t, E, threshold=60.0)
   do strumienia na żywo nadaje się z jednopróbkowym opóźnieniem.
 
 Uruchomienie: `python demo.py` / testy: `pytest -q`.
+
+## Integracja z TIMDR-META-DYNAMICS (eksperymentalna) — wibracja łożysk
+
+`bearing_meta_adapter.py` mapuje sygnał wibracji łożyska (akcelerometr) na
+`MetaState(Λ,τ,ρ,J)` z repozytorium-siostry `TIMDR-META-DYNAMICS` —
+czwarta realna integracja tego formalizmu w ekosystemie (pierwsza:
+finansowa w `analizator-gieldowy-v3`, druga: pogodowa w `Synoptyk-v3`,
+trzecia: sejsmiczna w `TIMDR-Earthquake-Core`, którego `flow()`/`trm()`
+ten adapter **importuje jako sibling** zamiast duplikować — te funkcje są
+domenowo-niezależne, zweryfikowane raz przeciw ObsPy w kontekście
+sejsmicznym).
+
+**Dane**: [CWRU Bearing Dataset](https://engineering.case.edu/bearingdatacenter)
+(Case Western Reserve University), mirror w formacie `.npz`
+[`srigas/CWRU_Bearing_NumPy`](https://github.com/srigas/CWRU_Bearing_NumPy)
+— 1797 RPM, kanał DE, 12 kHz, jedno zdrowe łożysko + trzy typy uszkodzeń
+0.021" (bieżnia wewnętrzna IR, bieżnia zewnętrzna OR@6, element toczny B).
+Pobrane w sesji interaktywnej przez przeglądarkę (`fetch`+`JSZip`,
+konwersja `.npz→tablice` w JS) — **bash tego środowiska ma zablokowany
+dostęp do `raw.githubusercontent.com`** (`403 blocked-by-allowlist`,
+zweryfikowane), więc pełne nagrania (10-20s każde) nie mogły zostać
+automatycznie ściągnięte do repo. `data/cwru_bearing/*.csv` zawiera tylko
+pierwsze 1536 próbek (0.128s) z każdego nagrania — wystarczające do testu
+end-to-end/kształtu, **nie** do odtworzenia pełnej analizy statystycznej
+poniżej (która użyła całych nagrań); pełne pliki można pobrać samodzielnie
+pod wskazanym adresem.
+
+**Cztery próby, trzy nieudane — pełna historia w docstringu modułu**:
+
+1. Dane zdecymowane do 500 Hz (żeby dało się przesłać przez wąski kanał
+   przeglądarka→sandbox), Λ = pół widma na pół (jak w
+   `TIMDR-Earthquake-Core`): **zero sensownej dyskryminacji** — łożysko z
+   uszkodzeniem elementu tocznego wyszło SPOKOJNIEJSZE niż zdrowe (ρ=0,
+   J=0), odwrotnie niż oczekiwane. Przyczyna: decymacja boxcar /24 to
+   prymitywny filtr antyaliasingowy z zerami dokładnie na wielokrotnościach
+   500 Hz, który różnie tłumi różne typy usterek.
+2. Pełna rozdzielczość natywna 12 kHz (bez decymacji), wciąż Λ = pół na
+   pół: naprawiło problem z elementem tocznym (ρ/τ/J teraz sensownie
+   podwyższone u wszystkich trzech typów uszkodzeń), ale operator M
+   (pochodna stanu) rzadko dawał fazę „krytyczna” — bo M mierzy ZMIANĘ
+   między oknami, a uszkodzenie łożyska to stan STAŁY przez cały zapis
+   (w przeciwieństwie do mainshocku trzęsienia ziemi, który jest
+   prawdziwym przejściem w środku ciągłego zapisu).
+3. Kurtoza widmowa (jeden poziom rozdzielczości, 4096 próbek): **szum, nie
+   sygnał** — za mało niezależnych ramek (29-59) na tak wąskie pasmo (2.93
+   Hz/bin). Piki niespójne między typami usterek (jeden na granicy
+   Nyquista, jeden blisko DC — artefakty numeryczne).
+4. Wielopoziomowy "kurtogram" (STFT, 7 długości okna 64-4096 próbek,
+   różnica SK(uszkodzenie)−SK(zdrowe)): dalej niespójne (piki: 5625 Hz,
+   6000 Hz — znów granica Nyquista, 12 Hz — znów blisko DC). Prawdziwy
+   Fast Kurtogram (Antoniego) wymaga starannego banku filtrów
+   rekurencyjnych — to przybliżenie przez STFT nie wystarczyło.
+
+**Znalezisko końcowe (użyte w kodzie)**: prosta moc pasmowa względem
+REALNEJ zdrowej referencji — uśrednione widmo mocy (FFT na oknach 4096
+próbek, natywne 12 kHz) podzielone na 12 pasm co ~500 Hz, porównane
+uszkodzenie/zdrowe pasmo-po-paśmie. W paśmie **~2.5-4 kHz** stosunek
+wynosi: IR21 ≈ 32 600× i 34 400×, OR@6_21 ≈ 28 150×, 33 700× i 90 000×,
+B21 ≈ 620× i 3 640× (słabiej, ale ten sam wzorzec pasmowy) — klasyczny
+sygnał rezonansu strukturalnego obudowy łożyska wzbudzanego uderzeniami
+(to, co w prawdziwej diagnostyce łożysk wyciąga się metodą
+obwiedni/spectral kurtosis — tu znalezione prostszym narzędziem, bo
+akurat była dostępna prawdziwa zdrowa referencja, silniejszy punkt
+odniesienia niż ślepa kurtoza). `RESONANCE_BAND_HZ=(2500,4000)` w kodzie
+jest tym stałym, **empirycznym** pasmem — nie wykrywanym automatycznie
+per-maszynę (próbowano, patrz próby 3/4 wyżej, nie udało się w tej sesji).
+
+**Dwie ścieżki zamiast jednej**: w przeciwieństwie do adaptera
+sejsmicznego (jeden ciągły ślad, próg liczony z wcześniejszej/całej jego
+części), łożysko nie ma „spokojnego okresu przed zdarzeniem” wewnątrz
+jednego zapisu — to reżim stały. `build_meta_series_from_reference_and_test()`
+liczy progi τ/ρ/J z osobnego REFERENCYJNEGO (zdrowego) nagrania, a Λ
+(pasmo rezonansu) osobno, samo-znormalizowane — dopiero
+`MetaOperatorM.magnitude()` z `TIMDR-META-DYNAMICS` (niezmieniony) sumuje
+obie ścieżki w jeden stan. Koncepcyjnie odpowiada to temu, jak GIA-TIMDR
+formalnie rozdziela gałęzie tego samego formalizmu na odrębne obiekty
+(patrz skill `timdr-signal-framework`, Axioms_S vs Axioms_G vs Axioms_K) —
+tu „stan względem referencji” i „energia w paśmie rezonansu” jako trzecia,
+niezależnie liczona wielkość. To pozostaje **otwartym wątkiem
+koncepcyjnym** (jak niedomknięte G4/G7 w `Axioms_G_TIMDR_Geometry.md`) —
+żaden nowy aksjomat nie został tu dopisany, to tylko użycie istniejącego
+trójkąta Λ-τ-ρ-J, nie jego formalne rozszerzenie.
+
+**Wynik na realnych danych (fixture 0.128s, 4 okna po 384 próbki)**:
+zdrowe łożysko porównane samo ze sobą daje ρ=0; wszystkie trzy typy
+uszkodzeń dają WYŻSZE ρ i Λ niż zdrowa referencja (IR21: ρ=0.668,
+Λ=0.907; OR@6_21: ρ=0.438, Λ=0.867; B21: ρ=0.220, Λ=0.824 — dla
+porównania zdrowe: ρ=0.000, Λ=0.002) — a kontrast Λ jest na tyle
+ekstremalny, że nawet operator M (pochodna, zaprojektowany do wykrywania
+przejść, nie reżimów stałych — patrz próba 2) wychodzi „krytyczna” na
+każdym oknie testowym z usterką. To własność SKALI tego konkretnego
+kontrastu, nie gwarancja — przy słabszym/wczesnym uszkodzeniu sam stan
+(`states`) może dyskryminować, zanim zrobi to jego pochodna (`phases`).
+
+Test: `test_bearing_meta_adapter.py` (13 testów: kontrole syntetyczne
+pozytywna/negatywna, walidacja wejścia, kształt wzorów, oraz 5 testów na
+realnych danych CWRU — negatywna kontrola zdrowe-vs-samo-siebie,
+pozytywna kontrola dla każdego z 3 typów usterek, end-to-end).
+
+## Uwaga o stanie tego lokalnego repo (2026-09-08)
+
+Ten folder lokalny nie miał `.git` (był zwykłym, niewersjonowanym
+katalogiem) i był STARSZĄ migawką niż `origin/main` na GitHubie — brakowało
+`HISTORIA_BLEDOW.md`, `LICENSE`, `monitor.py`, `obd_source.py`,
+`real_engines/` oraz nowszych wersji `timdr_industrial_fusion.py`/
+`timdr_industrial_predict.py`/testów (m.in. `calibrate()`/
+`predict_failure_smoothed()` - patrz `HISTORIA_BLEDOW.md`). Naprawiono
+przez `git init` + `git remote add origin` + zsynchronizowanie working
+tree z `origin/main` (`git checkout origin/main -- .`) PRZED dopisaniem
+tego adaptera, żeby nie nadpisać nowszej pracy starszą kopią.
+
+Przy okazji znaleziono i naprawiono jeden dodatkowy błąd: `real_engines/`
+było scommitowane na złym poziomie katalogów (root repo), podczas gdy
+`demo_scenarios.py` (`DATA_DIR`) i `real_engines/README.md` (własny tekst:
+"patrz data/real_engines/README.md") jednoznacznie zakładają
+`data/real_engines/` — dwa testy (`real_engine_1_full`,
+`real_engine_2_live`) faktycznie failowały z `FileNotFoundError` przed tą
+poprawką. Przeniesiono folder na właściwe miejsce.
