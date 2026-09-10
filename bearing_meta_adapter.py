@@ -174,8 +174,6 @@ UCZCIWE ZASTRZEZENIA:
 """
 from __future__ import annotations
 
-import os
-import sys
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -194,32 +192,15 @@ RESONANCE_BAND_HZ = (2500.0, 4000.0)
 # (patrz test_bearing_meta_adapter.py), bo fixture'y maja tylko 1536 probek.
 WINDOW_SAMPLES_DEFAULT = 4096
 
-
-def _ensure_siblings_on_path() -> None:
-    """Dodaje DWA foldery-siostry do sys.path: TIMDR-META-DYNAMICS (dla
-    MetaState/MetaOperatorM/MetaMap/MetaTrigger) i TIMDR-Earthquake-Core
-    (dla TIMDR_EarthquakeCore - flow/trm sa domenowo-niezalezne, patrz
-    docstring modulu). Oba leza BEZPOSREDNIO w katalogu nadrzednym tego
-    repo (TIMDR-Industrial-Predict), tak jak TIMDR-Earthquake-Core samo w
-    sobie ma tylko jednego siblinga."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    for name in ("TIMDR-META-DYNAMICS", "TIMDR-Earthquake-Core"):
-        sibling = os.path.abspath(os.path.join(here, "..", name))
-        if not os.path.isdir(sibling):
-            raise ImportError(
-                f"bearing_meta_adapter wymaga folderu '{name}' jako siostry "
-                f"repo TIMDR-Industrial-Predict (szukano w: {sibling})."
-            )
-        if sibling not in sys.path:
-            sys.path.insert(0, sibling)
-
-
-_ensure_siblings_on_path()
-
-from timdr_meta_dynamics import MetaState, MetaOperatorM  # noqa: E402
-from analysis.meta_map import MetaMap  # noqa: E402
-from analysis.meta_trigger import MetaTrigger, MetaTriggerResult  # noqa: E402
-from timdr_core_earthquake import TIMDR_EarthquakeCore  # noqa: E402
+# ZWENDOROWANE 2026-09-10 (patrz naglowki `_vendor_*.py` w tym repo dla
+# pelnego uzasadnienia): wczesniej ten modul ladowal TIMDR-META-DYNAMICS
+# i TIMDR-Earthquake-Core przez sys.path sibling-import z folderow-siostr
+# na dysku. Zamienione na lokalne, zwendorowane kopie, zeby to repo
+# dzialalo samodzielnie po sklonowaniu WYLACZNIE siebie (decyzja na
+# wyrazna prosbe: "repozytoria kodu maja byc niezalezne od siebie").
+# Zachowanie/matematyka bez zmian.
+from _vendor_timdr_meta_dynamics_core import MetaState, MetaOperatorM, MetaMap, MetaTrigger, MetaTriggerResult
+from _vendor_timdr_core_earthquake import TIMDR_EarthquakeCore
 
 
 @dataclass
