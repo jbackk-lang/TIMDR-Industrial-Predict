@@ -191,13 +191,18 @@
   <div class="controls" style="margin-bottom:10px;">
     <label>nagranie testowe</label>
     <select id="inBearingFault"></select>
+    <label>źródło</label>
+    <select id="inBearingSource">
+      <option value="fixture">fragment demo (1536 próbek)</option>
+      <option value="full">pełne nagranie źródłowe</option>
+    </select>
     <button id="btnBearingLoad">▶ Analizuj</button>
   </div>
   <div class="legend">
     <span><i class="dot" style="background:var(--ok)"></i>stabilna</span>
     <span><i class="dot" style="background:var(--warn)"></i>przejściowa</span>
     <span><i class="dot" style="background:var(--crit)"></i>krytyczna</span>
-    <span style="margin-left:14px;">jeden segment = jedno okno (384 próbki @ 12kHz)</span>
+    <span style="margin-left:14px;" id="bearingWindowInfo">jeden segment = jedno okno (384 próbki @ 12kHz)</span>
   </div>
   <div id="bearingMetaBox"><div class="empty-msg">Wybierz nagranie i kliknij "Analizuj".</div></div>
   <div class="meta-note" id="bearingNote"></div>
@@ -580,12 +585,15 @@ function renderBearing(data){
       <tbody>${rows}</tbody>
     </table>`;
   document.getElementById('bearingNote').textContent = data.note || '';
+  document.getElementById('bearingWindowInfo').textContent =
+    `jedno okno = ${data.window_samples} próbek @ ${data.fs / 1000}kHz · ${data.n_samples} próbek`;
 }
 
 async function loadBearingDemo(){
   const fault = document.getElementById('inBearingFault').value;
+  const source = document.getElementById('inBearingSource').value;
   if (!fault) return;
-  const res = await fetch('/api/bearing/demo?fault=' + encodeURIComponent(fault));
+  const res = await fetch('/api/bearing/demo?fault=' + encodeURIComponent(fault) + '&source=' + encodeURIComponent(source));
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
   renderBearing(data);

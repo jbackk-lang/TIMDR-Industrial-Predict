@@ -9,7 +9,8 @@ Serwer Flask udostepniajacy:
   GET  /api/health        -> healthcheck samego API (nie mylic z health_score maszyny)
   GET  /api/bearing/scenarios -> lista realnych nagran CWRU (referencja + 3 typy usterek)
   GET  /api/bearing/demo      -> meta-dynamika (Lambda/tau/rho/J, bearing_meta_adapter.py) na
-                                  realnych danych CWRU (?fault=normal|ir21|or6_21|b21)
+                                  realnych danych CWRU (?fault=normal|ir21|or6_21|b21,
+                                  ?source=fixture|full)
 
 Uruchomienie: `python api.py` (albo `run.bat` na Windows), potem
 http://127.0.0.1:5000 w przegladarce.
@@ -44,13 +45,22 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 # w test_bearing_meta_adapter.py, NIE nowo dobrana tutaj.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BEARING_DATA_DIR = os.path.join(_HERE, "data", "cwru_bearing")
+_BEARING_RAW_DIR = os.path.join(
+    _BEARING_DATA_DIR, "b4_raw", "source_mirror", "Data", "1797 RPM"
+)
 _BEARING_FS = 12000.0
 _BEARING_WINDOW_SAMPLES = 384
+_BEARING_FULL_WINDOW_SAMPLES = 4096
 _BEARING_FIXTURES = {
     "normal": ("normal_1797_de_first1536.csv", "Zdrowe łożysko (referencja, porównana sama ze sobą)"),
     "ir21": ("ir_0021_1797_de_first1536.csv", "Usterka bieżni wewnętrznej (IR, 0.021\")"),
     "or6_21": ("or6_0021_1797_de_first1536.csv", "Usterka bieżni zewnętrznej (OR@6, 0.021\")"),
     "b21": ("b_0021_1797_de_first1536.csv", "Usterka elementu tocznego (B, 0.021\")"),
+}
+_BEARING_FULL_RECORDINGS = {
+    "normal": "1797_Normal.npz",
+    "ir21": "1797_IR_21_DE12.npz",
+    "or6_21": "1797_OR@6_21_DE12.npz",
 }
 _meta_operator_bearing = MetaOperatorM()
 
@@ -59,6 +69,23 @@ def _load_bearing_fixture(filename: str):
     path = os.path.join(_BEARING_DATA_DIR, filename)
     s = np.loadtxt(path, delimiter=",")
     t = np.arange(len(s), dtype=np.float64) / _BEARING_FS
+    return t, s
+
+
+def _load_bearing_full_recording(fault: str):
+    """Load the source-mirror DE channel without copying it into the API.
+
+    CWRU's native DE channel is the signal used by the existing fixture
+    pipeline.  The normal source recording has no BA channel, so DE is the
+    only common, preregistered channel across all full recordings.
+    """
+    filename = _BEARING_FULL_RECORDINGS[fault]
+    path = os.path.join(_BEARING_RAW_DIR, filename)
+    with np.load(path) as recording:
+        if "DE" not in recording:
+            raise OSError(f"Brak kanału DE w źródłowym nagraniu CWRU: {path}")
+        s = np.asarray(recording["DE"], dtype=float).reshape(-1)
+    t = np.arange(s.size, dtype=np.float64) / _BEARING_FS
     return t, s
 
 
@@ -209,30 +236,49 @@ def api_bearing_demo():
     if fault not in _BEARING_FIXTURES:
         return jsonify({"error": f"Nieznany fault '{fault}'. Dostępne: {sorted(_BEARING_FIXTURES)}"}), 400
 
-    ref_filename, _ = _BEARING_FIXTURES["normal"]
-    test_filename, _ = _BEARING_FIXTURES[fault]
+    source = request.args.get("source", "fixture")
+    if source not in {"fixture", "full"}:
+        return jsonify({"error": "Nieznane source; użyj 'fixture' albo 'full'."}), 400
+    if source == "full" and fault not in _BEARING_FULL_RECORDINGS:
+        return jsonify({"error": f"Brak pełnego nagrania źródłowego dla '{fault}'."}), 400
+
     try:
-        t_ref, s_ref = _load_bearing_fixture(ref_filename)
-        t_test, s_test = _load_bearing_fixture(test_filename)
+        if source == "full":
+            t_ref, s_ref = _load_bearing_full_recording("normal")
+            t_test, s_test = _load_bearing_full_recording(fault)
+            window_samples = _BEARING_FULL_WINDOW_SAMPLES
+        else:
+            ref_filename, _ = _BEARING_FIXTURES["normal"]
+            test_filename, _ = _BEARING_FIXTURES[fault]
+            t_ref, s_ref = _load_bearing_fixture(ref_filename)
+            t_test, s_test = _load_bearing_fixture(test_filename)
+            window_samples = _BEARING_WINDOW_SAMPLES
     except OSError as exc:
-        return jsonify({"error": f"Brak pliku fixture CWRU: {exc}"}), 500
+        return jsonify({"error": f"Brak pliku CWRU: {exc}"}), 500
 
     try:
         result = build_meta_series_from_reference_and_test(
             t_ref, s_ref, t_test, s_test,
-            fs=_BEARING_FS, window_samples=_BEARING_WINDOW_SAMPLES,
+            fs=_BEARING_FS, window_samples=window_samples,
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
     return jsonify({
         "fault": fault,
+        "source": source,
         "label": _BEARING_FIXTURES[fault][1],
         "fs": _BEARING_FS,
-        "window_samples": _BEARING_WINDOW_SAMPLES,
+        "window_samples": window_samples,
+        "n_samples": int(s_test.size),
         "note": (
-            "Fragment 0.128s (1536 próbek, pierwsze z każdego nagrania CWRU) - "
-            "nie pełne nagranie (patrz README/zastrzeżenie #5 w bearing_meta_adapter.py). "
+            (
+                "Pełne, zachowane nagranie źródłowe CWRU: kanał DE, 12 kHz. "
+                "Nie jest kopiowane ani wysyłane poza lokalne API. "
+                if source == "full" else
+                "Fragment 0.128s (1536 próbek, pierwsze z każdego nagrania CWRU) - "
+                "nie pełne nagranie. "
+            ) +
             "Ufaj przede wszystkim kolumnie 'states' (Λ/τ/ρ/J), nie samym fazom "
             "M-operatora - patrz zastrzeżenie #4: uszkodzenie łożyska to stan stały, "
             "nie przejście, więc pochodna M rzadko wychodzi 'krytyczna'."
