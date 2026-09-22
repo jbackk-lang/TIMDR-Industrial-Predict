@@ -29,6 +29,10 @@ from bearing_meta_adapter import (
     MetaOperatorM,
     build_meta_series_from_reference_and_test,
 )
+from bearing_envelope_diagnostics import (
+    characteristic_frequencies,
+    diagnose_fault_type,
+)
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
@@ -61,7 +65,9 @@ _BEARING_FULL_RECORDINGS = {
     "normal": "1797_Normal.npz",
     "ir21": "1797_IR_21_DE12.npz",
     "or6_21": "1797_OR@6_21_DE12.npz",
+    "b21": "1797_B_21_DE12.npz",
 }
+_BEARING_RPM = 1797.0
 _meta_operator_bearing = MetaOperatorM()
 
 
@@ -284,6 +290,56 @@ def api_bearing_demo():
             "nie przejście, więc pochodna M rzadko wychodzi 'krytyczna'."
         ),
         "result": _bearing_result_to_dict(result),
+    })
+
+
+@app.route("/api/bearing/fault-type")
+def api_bearing_fault_type():
+    """Diagnostyka TYPU usterki (BPFO/BPFI/BSF) metoda widma obwiedni -
+    patrz bearing_envelope_diagnostics.py. W ODROZNIENIU od /api/bearing/demo
+    (Lambda/tau/rho/J - "czy anomalne") ten endpoint odpowiada "jaki typ".
+
+    Wymaga PELNEGO nagrania (source=full w /api/bearing/demo uzywa tych
+    samych plikow) - fixture 1536-probkowy ma za gruba rozdzielczosc widma
+    obwiedni (~7.8 Hz/bin) zeby rozdzielic BPFO(107)/BSF(141)/BPFI(162) Hz,
+    dlatego ten endpoint NIE ma parametru source i zawsze uzywa pelnych
+    nagran zrodlowych."""
+    fault = request.args.get("fault", "ir21")
+    if fault not in _BEARING_FULL_RECORDINGS or fault == "normal":
+        return jsonify({
+            "error": f"Nieznany albo niedostepny fault '{fault}'. Dostepne: "
+                     f"{sorted(k for k in _BEARING_FULL_RECORDINGS if k != 'normal')}"
+        }), 400
+
+    try:
+        _, s_ref = _load_bearing_full_recording("normal")
+        _, s_test = _load_bearing_full_recording(fault)
+    except OSError as exc:
+        return jsonify({"error": f"Brak pliku CWRU: {exc}"}), 500
+
+    diag = diagnose_fault_type(s_ref, s_test, _BEARING_FS, _BEARING_RPM)
+
+    return jsonify({
+        "fault": fault,
+        "label": _BEARING_FIXTURES[fault][1],
+        "rpm": _BEARING_RPM,
+        "characteristic_frequencies_hz": characteristic_frequencies(_BEARING_RPM),
+        "resonance_band_used_hz": list(diag.resonance_band_used),
+        "resonance_band_kurtosis": diag.resonance_band_kurtosis,
+        "ratios_test_over_reference": diag.ratios,
+        "best_match": diag.best_match,
+        "best_match_ratio": diag.best_match_ratio,
+        "is_specific": diag.is_specific,
+        "note": (
+            "ratio = wysokosc piku widma obwiedni w teście / w zdrowej referencji, "
+            "przy każdej częstotliwości charakterystycznej (BPFO=bieżnia zewnętrzna, "
+            "BPFI=bieżnia wewnętrzna, BSF=element toczny, FTF=koszyk). ratio>>1 = "
+            "podwyższony pik względem zdrowego. best_match = częstotliwość o "
+            "najwyższym ratio; is_specific=False oznacza brak wyraźnej przewagi nad "
+            "drugą najwyższą częstotliwością (NIE błąd pipeline'u) - usterki elementu "
+            "tocznego (B/BSF) są znanym, trudniejszym przypadkiem diagnostycznym w "
+            "literaturze, więc is_specific=False dla nich jest oczekiwane, nie błędne."
+        ),
     })
 
 

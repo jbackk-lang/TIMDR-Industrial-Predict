@@ -208,6 +208,21 @@
   <div class="meta-note" id="bearingNote"></div>
 </div>
 
+<div class="panel" style="margin-bottom:14px;">
+  <h2>Wibracja łożyska — typ usterki (BPFO/BPFI/BSF, widmo obwiedni)</h2>
+  <div class="meta-note">Inne pytanie niż panel Λ/τ/ρ/J powyżej: nie "czy anomalne", tylko "jaki typ" —
+    metoda widma obwiedni (filtr wokół pasma rezonansu, dobranego automatycznie przez kurtozę z nagrania
+    zdrowego, potem obwiednia Hilberta i widmo tej obwiedni). Wymaga pełnych nagrań źródłowych (fragment
+    demo 1536 próbek ma za grubą rozdzielczość widma).</div>
+  <div class="controls" style="margin-bottom:10px;">
+    <label>nagranie testowe</label>
+    <select id="inFaultTypeFault"></select>
+    <button id="btnFaultTypeLoad">▶ Diagnozuj typ</button>
+  </div>
+  <div id="faultTypeBox"><div class="empty-msg">Wybierz nagranie i kliknij "Diagnozuj typ".</div></div>
+  <div class="meta-note" id="faultTypeNote"></div>
+</div>
+
 <footer>TIMDR-Industrial-Predict · lokalne API (Flask, 127.0.0.1:5000) · dane nie opuszczają tego komputera · wykresy rysowane własnym kodem (canvas), bez zależności od CDN</footer>
 
 <script>
@@ -603,6 +618,73 @@ document.getElementById('btnBearingLoad').addEventListener('click', () => {
   loadBearingDemo().catch(e => showError(e.message));
 });
 loadBearingScenarios().then(loadBearingDemo).catch(e => showError(e.message));
+
+// ------------------------------------------------------------
+// Wibracja łożyska — typ usterki (BPFO/BPFI/BSF) - bearing_envelope_diagnostics.py
+// Osobny endpoint/panel: inna metoda (widmo obwiedni), inne pytanie
+// ("jaki typ", nie "czy anomalne") - patrz docstring modułu.
+// ------------------------------------------------------------
+const FAULT_TYPE_LABELS = { BPFO: 'bieżnia zewnętrzna (BPFO)', BPFI: 'bieżnia wewnętrzna (BPFI)', BSF: 'element toczny (BSF)', FTF: 'koszyk (FTF)' };
+
+async function loadFaultTypeScenarios(){
+  const res = await fetch('/api/bearing/scenarios');
+  if (!res.ok) throw new Error('nie udało się pobrać listy nagrań CWRU (HTTP ' + res.status + ')');
+  const scenarios = await res.json();
+  const sel = document.getElementById('inFaultTypeFault');
+  sel.innerHTML = scenarios.filter(s => s.id !== 'normal').map(s => `<option value="${s.id}">${s.label}</option>`).join('');
+}
+
+function renderFaultType(data){
+  const box = document.getElementById('faultTypeBox');
+  const ratios = data.ratios_test_over_reference || {};
+  const maxRatio = Math.max(1, ...Object.values(ratios).filter(v => Number.isFinite(v)));
+
+  const bars = Object.keys(FAULT_TYPE_LABELS).map(key => {
+    const v = ratios[key];
+    const pct = Number.isFinite(v) ? Math.max(2, (v / maxRatio) * 100) : 0;
+    const isBest = key === data.best_match;
+    const color = isBest ? (data.is_specific ? 'var(--ok)' : 'var(--warn)') : 'var(--muted)';
+    return `<div class="meta-row">
+        <div class="meta-label">${FAULT_TYPE_LABELS[key]}</div>
+        <div>
+          <div style="background:${color};height:16px;border-radius:3px;width:${pct}%;min-width:2px;"></div>
+          <div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:2px;">ratio = ${fmt(v, 2)}×${isBest ? '  ← best match' : ''}</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  const verdict = data.best_match
+    ? (data.is_specific
+        ? `<div class="meta-note" style="color:var(--ok);font-style:normal;">✓ Wyraźnie specyficzne dopasowanie: ${FAULT_TYPE_LABELS[data.best_match]}</div>`
+        : `<div class="meta-note" style="color:var(--warn);font-style:normal;">⚠ Niejednoznaczne — najwyższy ratio przy ${FAULT_TYPE_LABELS[data.best_match]}, ale bez wyraźnej przewagi (typowe dla usterek elementu tocznego, patrz notatka niżej)</div>`)
+    : `<div class="meta-note">Brak jednoznacznego dopasowania.</div>`;
+
+  box.innerHTML = `
+    <div class="meta-row">
+      <div class="meta-label">${data.label}</div>
+      <div style="font-family:var(--mono);font-size:11px;color:var(--muted);">
+        pasmo rezonansu (auto, kurtoza): ${data.resonance_band_used_hz[0]}–${data.resonance_band_used_hz[1]} Hz
+        (kurtoza=${fmt(data.resonance_band_kurtosis, 3)}) · RPM=${data.rpm}
+      </div>
+    </div>
+    ${verdict}
+    ${bars}`;
+  document.getElementById('faultTypeNote').textContent = data.note || '';
+}
+
+async function loadFaultType(){
+  const fault = document.getElementById('inFaultTypeFault').value;
+  if (!fault) return;
+  const res = await fetch('/api/bearing/fault-type?fault=' + encodeURIComponent(fault));
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  renderFaultType(data);
+}
+
+document.getElementById('btnFaultTypeLoad').addEventListener('click', () => {
+  loadFaultType().catch(e => showError(e.message));
+});
+loadFaultTypeScenarios().then(loadFaultType).catch(e => showError(e.message));
 
 // ------------------------------------------------------------
 // Zdarzenia

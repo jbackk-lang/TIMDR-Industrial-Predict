@@ -16,7 +16,11 @@ from bearing_meta_adapter import (
     compute_reference_thresholds,
     window_to_meta_state,
 )
-from timdr_core_earthquake import TIMDR_EarthquakeCore
+# NAPRAWIONE 2026-09-22 ("podmien i sprawdz"): stara nazwa `timdr_core_earthquake`
+# byla sprzed wendorowania z 2026-09-10 (patrz naglowek bearing_meta_adapter.py,
+# "ZWENDOROWANE 2026-09-10") - ten import blokowal cala kolekcje testow tego
+# pliku (ModuleNotFoundError), niezalezne od jakichkolwiek zmian w tej sesji.
+from _vendor_timdr_core_earthquake import TIMDR_EarthquakeCore
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(HERE, "data", "cwru_bearing")

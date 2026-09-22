@@ -175,7 +175,7 @@ UCZCIWE ZASTRZEZENIA:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -210,6 +210,8 @@ class BearingMetaResult:
     M_series: List[MetaState]      # M(t) = dS/dt, dlugosc n-1 - rzadko "krytyczna" dla lozysk, patrz #4
     phases: List[str]              # faza per krok M, dlugosc n-1
     trigger: MetaTriggerResult
+    resonance_band_used: Tuple[float, float] = RESONANCE_BAND_HZ  # pasmo faktycznie uzyte do Lambda (stale lub auto-wybrane)
+    resonance_band_kurtosis: Optional[float] = None  # kurtoza nadmiarowa wybranego pasma na s_ref, tylko gdy resonance_band="auto"
 
 
 def _robust_threshold(values: np.ndarray, k: float = ROBUST_K) -> float:
@@ -221,6 +223,89 @@ def _robust_threshold(values: np.ndarray, k: float = ROBUST_K) -> float:
     med = float(np.median(finite))
     mad = float(np.median(np.abs(finite - med))) * MAD_TO_STD
     return med + k * mad
+
+
+def _default_candidate_bands(fs: float, band_width_hz: float = 500.0, nyquist_margin: float = 0.85) -> List[Tuple[float, float]]:
+    """Siatka kandydackich pasm co `band_width_hz` Hz, zaczynajac od
+    `band_width_hz` (pomija DC), ograniczona do <= `nyquist_margin`*Nyquista.
+
+    UZASADNIENIE MARGINESU (2026-09-22, "podmien i sprawdz"): PROBA 3 w
+    GENEZIE modulu (wyzej) trafila na spurious kurtoze na pasmach dotykajacych
+    Nyquista (6000 Hz przy fs=12kHz) - artefakt maskowania FFT, nie fizyczny
+    rezonans, niezaleznie odtworzony i zdiagnozowany w GIA-TIMDR
+    (modal_band_energy_bridge v0.2 / envelope_demodulation): kandydat
+    (5500,6000) daje kurtoze ~130-160 (numeryczny artefakt), podczas gdy
+    siatka bezpieczna do 5000 Hz (margines 0.85 przy fs=12kHz) poprawnie
+    wybiera (3500,4000) Hz - blisko udokumentowanej stalej empirycznej
+    RESONANCE_BAND_HZ=(2500,4000) znalezionej rowniez tu (patrz GENEZA).
+    Domyslny margines 0.85 odtwarza dokladnie ten bezpieczny zakres przy
+    12 kHz (cap=5100 -> pasma 500..5000) i skaluje sie proporcjonalnie dla
+    innych czestotliwosci probkowania (np. inne repo/inna maszyna)."""
+    nyquist = fs / 2.0
+    cap = nyquist * nyquist_margin
+    bands = []
+    f_lo = band_width_hz
+    while f_lo + band_width_hz <= cap:
+        bands.append((f_lo, f_lo + band_width_hz))
+        f_lo += band_width_hz
+    return bands
+
+
+def _kurtosis_excess(signal: np.ndarray) -> float:
+    """Kurtoza nadmiarowa (Fisher, 0=Gauss). Reimplementowana lokalnie
+    (repo-do-repo, nie import - patrz naglowek modulu / decyzja o
+    samowystarczalnosci przez wendorowanie) - identyczna logika co
+    `timdr_formalism.envelope_demodulation.kurtosis_excess` w
+    TIMDR-Math-Formalism/GIA-TIMDR, gdzie zostala pierwotnie zweryfikowana
+    (PREREG_MODAL_BAND_ENERGY_BRIDGE_v0.2.md)."""
+    x = signal - np.mean(signal)
+    m2 = np.mean(x ** 2)
+    if m2 < 1e-18:
+        return 0.0
+    m4 = np.mean(x ** 4)
+    return float(m4 / (m2 ** 2) - 3.0)
+
+
+def _bandpass_fft(signal: np.ndarray, fs: float, f_lo: float, f_hi: float) -> np.ndarray:
+    """Maskowanie w dziedzinie czestotliwosci + odwrotna FFT. Reimplementacja
+    lokalna, jw."""
+    n = len(signal)
+    spectrum = np.fft.rfft(signal)
+    freqs = np.fft.rfftfreq(n, d=1.0 / fs)
+    mask = (freqs >= f_lo) & (freqs <= f_hi)
+    return np.fft.irfft(spectrum * mask, n=n)
+
+
+def select_resonance_band_from_reference(
+    s_ref: np.ndarray,
+    fs: float,
+    candidate_bands: Optional[List[Tuple[float, float]]] = None,
+) -> Tuple[Tuple[float, float], float]:
+    """Automatyczny wybor pasma rezonansu: pasmo z maksymalna kurtoza
+    nadmiarowa sposrod `candidate_bands`, wybrane z REFERENCYJNEGO (zdrowego)
+    nagrania PRZED jakimkolwiek porownaniem miedzy grupami - rezonans
+    strukturalny jest wlasciwoscia czujnika/obudowy, nie samego uszkodzenia
+    (ten sam argument metodologiczny co w GIA-TIMDR
+    PREREG_MODAL_BAND_ENERGY_BRIDGE_v0.2.md, patrz tez timdr-signal-framework
+    skill).
+
+    Zastepuje PROBE 3 z GENEZY modulu (ktora zawiodla przez brak marginesu
+    od Nyquista, patrz `_default_candidate_bands`) - ten sam pomysl, teraz
+    poprawnie ograniczony. Domyslna siatka kandydacka to
+    `_default_candidate_bands(fs)`. Zwraca (pasmo, kurtoza_najlepszego)."""
+    if candidate_bands is None:
+        candidate_bands = _default_candidate_bands(fs)
+    if not candidate_bands:
+        raise ValueError(f"Pusta siatka kandydacka pasm dla fs={fs} - Nyquist za niski")
+    best_band = None
+    best_kurt = -np.inf
+    for f_lo, f_hi in candidate_bands:
+        filtered = _bandpass_fft(s_ref, fs, f_lo, f_hi)
+        k = _kurtosis_excess(filtered)
+        if k > best_kurt:
+            best_kurt = k
+            best_band = (f_lo, f_hi)
+    return best_band, best_kurt
 
 
 def _resonance_band_fraction(s_window: np.ndarray, fs: float, band=RESONANCE_BAND_HZ) -> float:
@@ -292,14 +377,16 @@ def window_to_meta_state(
     s_window: np.ndarray,
     fs: float,
     thresholds: BearingGlobalThresholds,
+    resonance_band: Tuple[float, float] = RESONANCE_BAND_HZ,
 ) -> MetaState:
     """Mapowanie jednego okna (t,s) -> jeden MetaState. Lambda liczona z
-    RESONANCE_BAND_HZ (samo-znormalizowana, nie potrzebuje progu), tau/rho/J
-    wzgledem progow z REFERENCYJNEGO nagrania. Wzory zamrozone w
-    PRE-REJESTRACJI na gorze pliku."""
+    `resonance_band` (samo-znormalizowana, nie potrzebuje progu; domyslnie
+    stala empiryczna RESONANCE_BAND_HZ, patrz `select_resonance_band_from_reference`
+    dla alternatywy z automatycznym wyborem), tau/rho/J wzgledem progow z
+    REFERENCYJNEGO nagrania. Wzory zamrozone w PRE-REJESTRACJI na gorze pliku."""
     n = len(s_window)
 
-    Lambda = _resonance_band_fraction(s_window, fs)
+    Lambda = _resonance_band_fraction(s_window, fs, band=resonance_band)
 
     flow_grad = core.flow(t_window, s_window)
     abs_flow = np.abs(flow_grad)
@@ -329,6 +416,7 @@ def build_meta_series_from_reference_and_test(
     window_samples: int = WINDOW_SAMPLES_DEFAULT,
     core: Optional[TIMDR_EarthquakeCore] = None,
     dt: Optional[float] = None,
+    resonance_band: Union[Tuple[float, float], str] = RESONANCE_BAND_HZ,
 ) -> BearingMetaResult:
     """DWIE SCIEZKI zamiast jednego ciaglego sladu (patrz docstring modulu,
     'GENEZA'/PROBA 2): `(t_ref, s_ref)` to zdrowe nagranie referencyjne
@@ -344,6 +432,14 @@ def build_meta_series_from_reference_and_test(
     NIENAKLADAJACE SIE (partycjonowanie), tak jak w pozostalych trzech
     adapterach. `dt` (czas miedzy KOLEJNYMI OKNAMI, dla M-operatora)
     domyslnie = window_samples/fs.
+
+    `resonance_band` - domyslnie stala empiryczna RESONANCE_BAND_HZ
+    (zachowanie bez zmian wzgledem oryginalnego adaptera - patrz GENEZA).
+    Przekaz jawnie `"auto"`, zeby wybrac pasmo automatycznie z `s_ref` przez
+    kurtoze nadmiarowa (`select_resonance_band_from_reference`, siatka
+    kandydacka bezpieczna od Nyquista - patrz `_default_candidate_bands` i
+    zastrzezenie ponizej #1 o tym, ze RESONANCE_BAND_HZ nie jest uniwersalne).
+    Mozna tez podac wlasne pasmo `(f_lo, f_hi)` bezposrednio.
 
     Ostatnie, niepelne okno jest ODRZUCANE, nie dopelniane (jak w
     TIMDR-Earthquake-Core)."""
@@ -368,6 +464,13 @@ def build_meta_series_from_reference_and_test(
 
     thresholds = compute_reference_thresholds(core, t_ref, s_ref)
 
+    resolved_band: Tuple[float, float]
+    selected_kurtosis: Optional[float] = None
+    if resonance_band == "auto":
+        resolved_band, selected_kurtosis = select_resonance_band_from_reference(s_ref, fs)
+    else:
+        resolved_band = resonance_band  # type: ignore[assignment]
+
     n_windows = len(t_test) // window_samples
     if n_windows < 2:
         raise ValueError(
@@ -383,7 +486,7 @@ def build_meta_series_from_reference_and_test(
         t_win = t_test[start:end]
         s_win = s_test[start:end]
         window_starts.append(float(t_test[start]))
-        states.append(window_to_meta_state(core, t_win, s_win, fs, thresholds))
+        states.append(window_to_meta_state(core, t_win, s_win, fs, thresholds, resonance_band=resolved_band))
 
     meta_operator = MetaOperatorM()
     M_series: List[MetaState] = []
@@ -397,4 +500,5 @@ def build_meta_series_from_reference_and_test(
     return BearingMetaResult(
         window_starts=window_starts, states=states,
         M_series=M_series, phases=phases, trigger=trigger,
+        resonance_band_used=resolved_band, resonance_band_kurtosis=selected_kurtosis,
     )
