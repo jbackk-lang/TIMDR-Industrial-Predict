@@ -59,3 +59,36 @@ def test_real_cwru_fault_type(name, expected):
 def test_real_cwru_normal_scores_lower_than_faults():
     q = lambda n: max(S.analyze(np.load(CWRU + n + ".npz")["DE"], 12000, 1797, "6205").features[k] for k in ("Q_BPFO", "Q_BPFI"))
     assert q("1797_Normal") < min(q("1797_IR_21_DE12"), q("1797_OR@6_21_DE12")) - 1
+
+
+# ---------------- zmienna predkosc: sito w osi katowej ----------------
+def _variable_speed(order=4.593, fs=18500.0, T=120, seed=3):
+    n = int(T * fs); t = np.arange(n) / fs; fr = 0.3 + 0.5 * t / T
+    th = np.concatenate([[0.0], np.cumsum((fr[1:] + fr[:-1]) / 2) / fs])
+    x = np.random.default_rng(seed).standard_normal(n); imp = np.zeros(n)
+    k = np.searchsorted(th, np.arange(0, th[-1], 1 / order)); imp[k[k < n]] = 8
+    ring = np.exp(-np.arange(300) / 40) * np.sin(2 * np.pi * 4500 * np.arange(300) / fs)
+    return x + np.convolve(imp, ring, "same"), th, fs
+
+
+def test_orders_golden_values_match_validated_implementation():
+    # wartosci z GIA-TIMDR core/modal_speed_tracking.order_resonance_map + order_sieve (konfiguracja turbiny LBF), 2026-09-27
+    x, th, fs = _variable_speed()
+    r = S.analyze_orders(x, fs, th, "6007-LBF")
+    assert r["strongest"] == "BPFO" and r["segments"] == 2
+    assert r["features"]["QO_BPFO"] == pytest.approx(2.0980221945222293, abs=1e-9)
+    assert r["features"]["QO_BPFI"] == pytest.approx(1.600305466996475, abs=1e-9)
+    assert r["features"]["QO_BSF2"] == pytest.approx(1.807323026409767, abs=1e-9)
+
+
+def test_tach_angle_recovers_revolutions():
+    fs, tfs, ppr = 18500.0, 2960.0, 108
+    t = np.arange(int(60 * tfs)) / tfs; ang = 0.5 * t + 0.002 * t ** 2          # obroty
+    tach = (np.mod(ang * ppr, 1.0) < 0.5).astype(float) * 5
+    th, _, _ = S.shaft_angle_from_tach(tach, tfs, ppr, int(60 * fs), fs)
+    assert th[-1] == pytest.approx(0.5 * 60 + 0.002 * 3600, rel=0.02)
+
+
+def test_feasibility_flags_short_window():
+    assert not S.feasibility(0.1, 50.0)["sito_ma_szanse"]       # 5 cykli w oknie: grzebien rozmyty
+    assert S.feasibility(2.0, 76.0)["sito_ma_szanse"]

@@ -8,6 +8,17 @@ plus dispatcher priorytetyzujący te wyniki w jedno zdarzenie
 (`api.py` + `static/dashboard.html`), uruchamiany jednym kliknięciem
 przez `run.bat`.
 
+## ✅ Metody z walidacją pre-rejestrowaną (GIA-TIMDR)
+
+| Program | Do czego | Walidacja |
+|---|---|---|
+| `bearing_resonance_sieve.py analyze` | typ uszkodzenia łożyska przy stałej prędkości (sito rezonansowe) | Paderborn, uszkodzenia naturalne, 3 próby / 15 foldów: vs klasyczne +0,08 (**SUPPORTED**), vs kurtogram SUPPORTED, vs obwiednia +0,04 (mieszany) |
+| `bearing_resonance_sieve.py analyze-orders` | zmienna prędkość: sito w osi kątowej wirnika (zegar z tachometru) | turbina wiatrowa Fraunhofer LBF: bieżnia zewnętrzna AUC 1,00, swoistość 1,00 (bez osi kątowej 0,85) — **SUPPORTED**; bieżnia wewnętrzna i element toczny niewykryte |
+| `bearing_health_trend.py trend` | faza życia łożyska: pole → cząsteczka → powrót ku fali (parametr D) | PRONOSTIA, 11 nieoglądanych łożysk do zniszczenia: D spada w 9/11, powrót na końcu w 7/11 — **SUPPORTED**; D ≈ kurtoza (remis) |
+
+Każdy wynik zawiera `wykonalnosc` (N_cyk — liczba cykli rytmu uszkodzenia w oknie; < 10 → sito nie ma szans).
+Szczegóły i granice: [SITO_REZONANSOWE.md](SITO_REZONANSOWE.md). Liczby zgodne 1:1 z wersjami walidowanymi (testy wzorcowe).
+
 ## 🚨 `timdr_industrial_trigger.py` — jedno priorytetyzowane zdarzenie
 
 Dispatcher NIE liczy własnej statystyki - tylko woła już przetestowane
